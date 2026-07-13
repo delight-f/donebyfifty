@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
-import pytest
-from rich.panel import Panel
-from rich.console import Console
 
 from ui import (
     _display_earner_super_warnings,

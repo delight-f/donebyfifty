@@ -271,35 +271,6 @@ def choose_preset() -> str:
 
 
 # =============================================================================
-# PRESET SELECTION
-# =============================================================================
-
-
-def choose_preset() -> str:
-    """Let the user pick a household preset.
-
-    Returns:
-        One of ``"single"``, ``"couple"``, ``"family"``, ``"custom"``.
-
-    """
-    console.print(
-        Panel(
-            "[bold]Select a household preset:[/]\n\n"
-            "  1. Single (1 earner, no children)\n"
-            "  2. Couple, both working (2 earners, no children)\n"
-            "  3. Couple, single income (1 working, 1 not)\n"
-            "  4. Family (2 earners, children)\n"
-            "  5. Custom (configure everything)\n",
-            title="Household Setup",
-            border_style=THEME_COLOR_ACCENT,
-        )
-    )
-    choice = _prompt_int("Choice", default=1, lo=1, hi=5)
-    mapping = {1: "single", 2: "couple", 3: "single_income", 4: "family", 5: "custom"}
-    return mapping[choice]
-
-
-# =============================================================================
 # HOUSEHOLD CONFIGURATION
 # =============================================================================
 
@@ -514,7 +485,7 @@ def _configure_earner(label: str, defaults: Earner | None = None, start_age: int
             console.print(
                 f"  [bold {THEME_COLOR_WARN}]PT window ({pt_start}–{pt_end}) does not overlap"
                 f" with bridge period"
-                f" ({retire_age if emp_type in ("employed", "self_employed", "both") and retire_age < 999 else start_age}"
+                f" ({retire_age if emp_type in ('employed', 'self_employed', 'both') and retire_age < 999 else start_age}"
                 f"→{super_access})."
                 f" Income will not be applied.[/]"
             )

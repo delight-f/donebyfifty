@@ -17,14 +17,13 @@ from config import (
     BK_RHO,
     BK_SIGMA_MODERATE,
     BK_THETA,
-    CONC_CAP, SG_MAX_BASE, SG_RATE, SUPER_TAX_ON_CONTRIBUTIONS as SUPER_TAX_RATE,
+    CONC_CAP, SG_MAX_BASE, SUPER_TAX_ON_CONTRIBUTIONS as SUPER_TAX_RATE,
 )
 from models import Household, SimulationInputs, SimulationResults
 from primitives import (
     BRACKETS,
     EDU_SCHEDULE_TODAY,
     EQ_MEAN,
-    PT_DAILY_RATE,
     PT_WEEKS_PER_YEAR,
     SUPER_EQ_CORR,
     AssetHolding,

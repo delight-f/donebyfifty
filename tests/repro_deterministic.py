@@ -3,7 +3,7 @@ import sys, json
 sys.path.insert(0, ".")
 
 from models import _deserialise_inputs, _deserialise_child, _deserialise_mortgage, _deserialise_account
-from models import Household, Earner, SimulationInputs
+from models import Household
 import simulation as simmod
 
 # ── Load profile ──────────────────────────────────────────────────────

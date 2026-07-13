@@ -527,7 +527,6 @@ class TestCgtCostBaseIndexation:
         Old nominal: gain = 100k, CGT = 30k, net = 170k.
         Difference: $10,318 more with indexation.
         """
-        import math
         inf_factor = (1.03) ** 10  # ≈ 1.3439
         asset = {"val": 200_000.0, "basis": 100_000.0}
         result, _tax, _nofloor = sell_assets(asset, 200_000, cgt_on=True, weighted_marginal_rate=0.30,
@@ -577,7 +576,7 @@ class TestMarginalRate:
 
     def test_uses_module_brackets_not_hardcoded(self) -> None:
         """marginal_rate uses the same BRACKETS module-level constant."""
-        from primitives import marginal_rate, BRACKETS
+        from primitives import marginal_rate
         # Call with default brackets — should match BRACKETS
         rate_at_100k = marginal_rate(100_000)
         # Correct marginal rate for $100k = 0.30 (45-135k bracket)
@@ -657,7 +656,6 @@ class TestSellAssetsPhase2:
         Phase 1 CGT (at 30%): $19,682.  Net: $180,318.
         Phase 2 CGT (at 37.5%): $65,608 * 0.375 = $24,603.  Net: $175,397.
         """
-        import math
         inf_factor = (1.03) ** 10  # ≈ 1.3439
 
         # Phase 1 only (weighted_marginal_rate=0.30, old behaviour)
@@ -878,7 +876,6 @@ class TestUiSkipConditions:
 
     def test_single_earner_no_prompt(self) -> None:
         """Single-earner household: ownership defaults to {0: 1.0}."""
-        from ui import _configure_account
         from models import InvestmentAccount
         # Call with num_earners=1 — should not prompt, return default
         # We can't fully test the interactive prompt without mocking,
