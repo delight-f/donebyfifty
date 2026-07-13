@@ -1,0 +1,30 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+
+# --- Build output ---
+dist/
+build/
+montecarlo-cli.dist/
+main.dist/
+main.build/
+main.onefile-build/
+
+# --- Code quality caches ---
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# --- Project-specific ---
+profiles/
+*.json
+
+# --- OS / editor litter ---
+.~lock.*
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
