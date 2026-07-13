@@ -7,13 +7,22 @@ Two functions (``amortize_mortgage_monthly``, ``handle_offset_overflow``) have
 been converted from mutating a dataclass object in-place to pure functions that
 accept and return float values. Their internal arithmetic is identical to the
 verified original.
+
+Return assumptions: All asset-class return parameters (module-level constants
+below) represent real (inflation-adjusted) returns, consistent with the
+simulation engine's internal convention — the engine compounds in real terms
+and deflates dollar figures to today's dollars once at output
+(``simulation.py``). Returns are applied via lognormal draws using the standard
+Black-Scholes parameterisation (``mu = ln(1 + mean) - ½σ²``).
+Provenance and confidence for each figure are documented per-constant below.
+Not all figures are independently sourced; see individual comments for details.
 """
 
 from __future__ import annotations
 
 import math
 import random
-from typing import Final, TypedDict
+from typing import Final, Literal, TypedDict, overload
 
 # =============================================================================
 # TYPE DEFINITIONS
@@ -37,34 +46,140 @@ BRACKETS: Final[tuple[tuple[float, float], ...]] = (
     (45000, 0.16),
     (135000, 0.30),
     (190000, 0.37),
-    (float('inf'), 0.45),
+    (float("inf"), 0.45),
 )
 
 MEDICARE: Final[float] = 0.02
-CGT_FLOOR_RATE: Final[float] = 0.30  # post-2027 minimum (floor) CGT rate on real indexed gains, per owner
+CGT_FLOOR_RATE: Final[float] = (
+    0.30  # post-2027 minimum (floor) CGT rate on real indexed gains, per owner
+)
 # NOTE: This is a FLOOR, not a universal rate. The actual CGT rate per owner is
 # max(marginal_rate, CGT_FLOOR_RATE). For owners in the 37% or 45% bracket, their
 # marginal rate applies; this floor only catches owners whose marginal rate is below 30%.
 # (The 50% CGT discount was abolished post-2027; CPI indexation of cost basis replaces it.)
 
-# Asset class return assumptions
-EQ_MEAN: Final[float] = 0.07
-EQ_STD: Final[float] = 0.15
-SUPER_MEAN: Final[float] = 0.07
-SUPER_STD: Final[float] = 0.12
-SUPER_EQ_CORR: Final[float] = 0.80  # target correlation between super and equity
+# =============================================================================
+# Asset class return assumptions (real, inflation-adjusted)
+# =============================================================================
+# All returns are real (above inflation), consistent with the simulation engine's
+# internal convention. Applied via lognormal draws: r = exp(mu + sigma*Z) - 1
+# where mu = ln(1 + mean) - 0.5*sigma^2 (Black-Scholes parameterisation).
+# Provenance and confidence are documented per-constant below.
+# =============================================================================
 
-# Per-asset-class return parameters (for non-equity bridge accounts)
+# --- Equity (Australian) --------------------------------------------------------
+# Basis: real (inflation-adjusted).
+# Source: Credit Suisse / UBS Global Investment Returns Yearbook (with London
+#   Business School), Australian equities annualised real return since 1900:
+#   ~6.4-6.7% (edition-dependent; figure varies slightly by edition year and
+#   should not be cited as a single precise value).
+# Confidence: sourced (unconditional long-run historical; not valuation-adjusted).
+# Caveats: This is a 120+ year unconditional average, not a forward-looking
+#   forecast. Several major houses (Vanguard VCMM, Fidelity capital markets
+#   assumptions) currently forecast below-historical-average equity returns for
+#   the next decade due to elevated valuations. Data pre-1980 uses inconsistent
+#   methodology across sources (Market Index, 2024) and should be treated as
+#   indicative rather than precise. If precision matters more than defensibility
+#   for the model's horizon (10-20 years), consider a valuation-conditioned
+#   alternative instead.
+EQ_MEAN: Final[float] = 0.07
+
+# Confidence: unsourced-placeholder. No citation found for this figure.
+EQ_STD: Final[float] = 0.15
+
+# --- Super (equity-like) --------------------------------------------------------
+# Basis: real (inflation-adjusted), equity-like by assumption.
+# Source: UNSOURCED. Currently set equal to the equity mean by assumption
+#   (no independent source for superannuation-specific returns).
+# Confidence: unsourced-placeholder. A defensible source would be a specific
+#   super fund's published PDS investment-option return assumptions (e.g.
+#   balanced or growth option), not yet retrieved. The correlation to equity
+#   (SUPER_EQ_CORR = 0.80) is also an unsourced placeholder.
+# Caveats: Super funds are not identical to a pure equity index — they hold
+#   multi-asset portfolios with fees that reduce net returns. Treating super as
+#   "equity minus a discount" (lower mean, lower std, imperfect correlation) is
+#   a reasonable modelling choice but the specific numbers are unsourced.
+SUPER_MEAN: Final[float] = 0.07
+
+# Confidence: unsourced-placeholder. No citation found for this figure.
+SUPER_STD: Final[float] = 0.12
+
+# Confidence: unsourced-placeholder. Target correlation between super and equity.
+SUPER_EQ_CORR: Final[float] = 0.80
+
+# --- Bonds ---------------------------------------------------------------------
+# Basis: real (inflation-adjusted).
+# Source: RBA Bulletin (Fraser, 1991), "Three Decades of Real Interest Rates".
+#   Australian bond rate deflated by CPI averaged ~1.5% real over the period to
+#   1990.
+# Confidence: derived-estimate. The source supports a real bond return in the
+#   1-2% range. The current figure of 3.0% sits above this range.
+# Caveats: Fraser (1991) predates the low-rate 2010s-2020s period and may not
+#   reflect more recent conditions. The current 3.0% figure is higher than the
+#   1-2% band the source implies — this gap is flagged explicitly rather than
+#   silently adjusting the constant. If a more recent source is found, consider
+#   revising this downward.
 BOND_MEAN: Final[float] = 0.03
+
+# Confidence: unsourced-placeholder. No citation found for this figure.
 BOND_STD: Final[float] = 0.06
+
+# --- Cash ----------------------------------------------------------------------
+# Basis: real (inflation-adjusted).
+# Source: Same RBA source as Bonds — Fraser (1991) treats short-term / fixed-
+#   interest real returns as roughly 1-2% real, without cleanly separating cash
+#   from short bonds.
+# Confidence: derived-estimate. No cash-specific historical series was found.
+#   The current 2.5% figure sits at the upper edge of the 1-2% band the RBA
+#   source implies.
+# Caveats: Same vintage caveat as Bonds. A more recent cash-rate series (e.g.
+#   RBA cash rate target deflated by CPI) would strengthen this estimate.
 CASH_MEAN: Final[float] = 0.025
+
+# Confidence: unsourced-placeholder. No citation found for this figure.
 CASH_STD: Final[float] = 0.01
+
+# --- Property (Australian residential) -----------------------------------------
+# Basis: real (inflation-adjusted).
+# Source: CoreLogic — Australian dwelling prices grew ~6.4% p.a. (nominal,
+#   capital growth only) over the 30 years to ~2024/2025. A separate CoreLogic
+#   figure reports cumulative capital growth of 382% vs cumulative CPI growth of
+#   99.5% over the 30 years to 2022, implying comparable annualised nominal
+#   capital growth net of inflation.
+# Confidence: derived-estimate. The figures are capital growth only — no rental
+#   yield included, and they are nominal, requiring deflation to match the
+#   model's real-return convention. Derivation: real capital growth (~3.5-4%
+#   after deflating) + estimated net rental yield (~2-3%, not independently
+#   sourced) ≈ current 5% figure.
+# Caveats: The yield component (~2-3%) is not independently sourced; the two
+#   proxies (CoreLogic capital growth + unsourced yield estimate) were combined
+#   by the reviewer, not drawn from a single series. Capital growth data reflects
+#   a specific 30-year window and may not be representative of all holding
+#   periods. A total-return property index (e.g. MSCI Australia) would be
+#   preferable but was not retrieved.
 PROPERTY_MEAN: Final[float] = 0.05
+
+# Confidence: unsourced-placeholder. No citation found for this figure.
 PROPERTY_STD: Final[float] = 0.12
+
+# --- Intl Equity ---------------------------------------------------------------
+# Basis: real (inflation-adjusted).
+# Source: UNSOURCED. No citation found.
+# Confidence: unsourced-placeholder.
+# Caveats: International equity returns are not independent of Australian equity
+#   returns — the model captures this via INTL_EQ_CORR (also unsourced). A
+#   defensible source would be MSCI World ex-Australia or equivalent, not yet
+#   retrieved.
 INTL_EQ_MEAN: Final[float] = 0.065
+
+# Confidence: unsourced-placeholder. No citation found for this figure.
 INTL_EQ_STD: Final[float] = 0.16
 
-# Cross-asset correlations with equity
+# --- Cross-asset correlations with equity -------------------------------------
+# All correlation figures are unsourced-placeholder. No citation found for any.
+# A defensible source would be historical pairwise correlation matrices from
+# index providers (e.g. ASX, MSCI, Bloomberg AusBond) over a consistent lookback
+# window.
 BOND_EQ_CORR: Final[float] = 0.10
 CASH_EQ_CORR: Final[float] = 0.0
 PROPERTY_EQ_CORR: Final[float] = 0.60
@@ -104,7 +219,9 @@ INFLATION_MEAN: Final[float] = 0.025
 INFLATION_STD: Final[float] = 0.015
 # Log-mean with half-variance correction so E[inflation] = INFLATION_MEAN
 MU_INFLATION: Final[float] = math.log(1 + INFLATION_MEAN) - 0.5 * INFLATION_STD**2
-INFLATION_EQ_CORR: Final[float] = -0.15  # mild negative correlation: high inflation often coincides with poor equity returns
+INFLATION_EQ_CORR: Final[float] = (
+    -0.15
+)  # mild negative correlation: high inflation often coincides with poor equity returns
 SUPER_INF_CORR: Final[float] = -0.10  # correlation between super and inflation
 
 # Part-time work assumptions
@@ -114,7 +231,7 @@ PT_WEEKS_PER_YEAR: Final[float] = 48.0
 # Tax calculation cache: (gross_income, brackets_hash) -> net_income
 # The cache uses a content-based key so it works across years even when
 # brackets are rebuilt as new tuple objects (as long as the values are the same).
-PT_TAX_CALC_CACHE: dict[tuple[float, tuple], float] = {}
+PT_TAX_CALC_CACHE: dict[tuple[float, tuple[tuple[float, float], ...]], float] = {}
 
 # Education cost schedule (reference family's actual fee schedule, today's dollars)
 # $292,008 total, from original client's fee schedule.
@@ -186,7 +303,9 @@ def tax(
     return total_tax + taxable_income * (MEDICARE + medicare_surcharge)
 
 
-def marginal_rate(taxable_income: float, brackets=BRACKETS) -> float:
+def marginal_rate(
+    taxable_income: float, brackets: tuple[tuple[float, float], ...] | None = None
+) -> float:
     """Find the marginal (top-bracket) tax rate for a given taxable income.
 
     Reuses the same ``BRACKETS`` tuple as ``tax()`` — single source of truth.
@@ -240,19 +359,19 @@ def mls_rate_for_income(
 
 # Singles thresholds and rates
 MLS_TIERS_SINGLE: Final[tuple[tuple[float, float], ...]] = (
-    (90000.0, 0.0),          # Below $90k: no MLS
-    (105000.0, 0.01),        # $90k-$105k: Tier 1 (1.0%)
-    (140000.0, 0.0125),      # $105k-$140k: Tier 2 (1.25%)
-    (float('inf'), 0.015),   # $140k+: Tier 3 (1.5%)
+    (90000.0, 0.0),  # Below $90k: no MLS
+    (105000.0, 0.01),  # $90k-$105k: Tier 1 (1.0%)
+    (140000.0, 0.0125),  # $105k-$140k: Tier 2 (1.25%)
+    (float("inf"), 0.015),  # $140k+: Tier 3 (1.5%)
 )
 
 # Couple thresholds and rates
 # Note: MLS applies based on combined income for couples/families
 MLS_TIERS_COUPLE: Final[tuple[tuple[float, float], ...]] = (
-    (180000.0, 0.0),         # Below $180k: no MLS
-    (210000.0, 0.01),        # $180k-$210k: Tier 1 (1.0%)
-    (280000.0, 0.0125),      # $210k-$280k: Tier 2 (1.25%)
-    (float('inf'), 0.015),   # $280k+: Tier 3 (1.5%)
+    (180000.0, 0.0),  # Below $180k: no MLS
+    (210000.0, 0.01),  # $180k-$210k: Tier 1 (1.0%)
+    (280000.0, 0.0125),  # $210k-$280k: Tier 2 (1.25%)
+    (float("inf"), 0.015),  # $280k+: Tier 3 (1.5%)
 )
 
 
@@ -319,44 +438,31 @@ def clear_tax_cache() -> None:
 
 
 # =============================================================================
-# EDUCATION COST
-# =============================================================================
-
-
-def education_cost(
-    model_year: int,
-    child_current_age: int,
-    inflation: float,
-) -> float:
-    """Compute inflation-adjusted education cost for a given model year.
-
-    Includes preschool/daycare costs (ages 0-4) and school fees
-    (ages 5-17), inflated forward from today's dollars at the
-    specified annual inflation rate.
-
-    Args:
-        model_year: Years elapsed since simulation start (0-indexed).
-        child_current_age: Child's age at simulation start.
-        inflation: Annual inflation rate (decimal, e.g. 0.025).
-
-    Returns:
-        Education cost for the year in nominal dollars, or 0.0 if no cost.
-
-    """
-    child_age = child_current_age + model_year
-    annual_today = EDU_SCHEDULE_TODAY.get(child_age, 0.0)
-    if annual_today > 0:
-        return annual_today * (1 + inflation) ** model_year
-    return 0.0
-
-
-# =============================================================================
 # CORRELATED RETURN GENERATION (Cholesky decomposition)
 # =============================================================================
 
 
+@overload
 def generate_correlated_returns(
     rho: float = SUPER_EQ_CORR,
+    *,
+    return_z: Literal[True],
+    rng: random.Random | None = None,
+) -> tuple[float, float, float]: ...
+
+
+@overload
+def generate_correlated_returns(
+    rho: float = SUPER_EQ_CORR,
+    *,
+    return_z: Literal[False] = False,
+    rng: random.Random | None = None,
+) -> tuple[float, float]: ...
+
+
+def generate_correlated_returns(
+    rho: float = SUPER_EQ_CORR,
+    *,
     return_z: bool = False,
     rng: random.Random | None = None,
 ) -> tuple[float, float] | tuple[float, float, float]:
@@ -582,7 +688,11 @@ def sell_assets(
 
     if effective_cgt_rate >= 1.0:
         # Edge case: indexed basis is zero or very small -- all proceeds are gain
-        gross_needed = remain / (1.0 - weighted_marginal_rate) if cgt_on and weighted_marginal_rate < 1.0 else remain
+        gross_needed = (
+            remain / (1.0 - weighted_marginal_rate)
+            if cgt_on and weighted_marginal_rate < 1.0
+            else remain
+        )
     else:
         gross_needed = remain / (1.0 - effective_cgt_rate) if effective_cgt_rate < 1.0 else remain
 
@@ -626,8 +736,9 @@ def generate_mortgage_rate(
     sigma_tilde: float = 0.18,
     rho: float = 0.20,
 ) -> float:
-    """Generate a mortgage rate for one year using a Black-Karasinski
-    mean-reverting lognormal process (exact discrete AR(1) solution).
+    """Generate a one-year mortgage rate using a Black-Karasinski model.
+
+    The mean-reverting lognormal process uses the exact discrete AR(1)
 
     The continuous-time BK SDE is:
         d(ln r) = kappa * (ln theta - ln r) * dt + sigma_tilde * dW

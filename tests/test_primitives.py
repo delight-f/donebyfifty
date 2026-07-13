@@ -26,7 +26,6 @@ from primitives import (
     SUPER_STD,
     amortize_mortgage_monthly,
     consulting_net_income,
-    education_cost,
     generate_correlated_returns,
     handle_offset_overflow,
     sell_assets,
@@ -47,6 +46,7 @@ class TestConstants:
         assert BRACKETS[-1][1] == 0.45
         # The top threshold should be infinity (sentinel)
         from math import isinf
+
         assert isinf(BRACKETS[-1][0])
         # Rates should be non-decreasing
         rates = [r for _, r in BRACKETS]
@@ -163,39 +163,6 @@ class TestConsultingNetIncome:
 # =============================================================================
 # EDUCATION COST
 # =============================================================================
-
-
-class TestEducationCost:
-    """School fee schedule with inflation."""
-
-    @pytest.mark.parametrize(
-        ("year", "start_age", "inflation", "expected"),
-        [
-            (0, 5, 0.025, 19_168.0),  # Age 5, year 0, no inflation applied
-            (1, 5, 0.025, 20_471.30),  # Age 6 (schedule[6]=19972) * 1.025
-            (0, 20, 0.025, 0.0),  # Age 20 — outside schedule
-            (0, 2, 0.025, 15_000.0),  # Age 2 — preschool cost
-        ],
-    )
-    def test_known_costs(
-        self, year: int, start_age: int, inflation: float, expected: float
-    ) -> None:
-        assert education_cost(year, start_age, inflation) == pytest.approx(expected, abs=0.01)
-
-    def test_inflation_compounds(self) -> None:
-        """Cost at year N should be inflated by (1+inflation)^N."""
-        base = EDU_SCHEDULE_TODAY[5]
-        cost_y0 = education_cost(0, 5, 0.03)
-        cost_y1 = education_cost(1, 5, 0.03)
-        assert cost_y0 == base
-        # Year 1: child is age 6, schedule[6] = 19972
-        expected_y1 = EDU_SCHEDULE_TODAY[6] * 1.03
-        assert cost_y1 == pytest.approx(expected_y1, abs=0.01)
-
-    def test_zero_for_no_schedule(self) -> None:
-        """Age not in schedule should return 0."""
-        for age in [18, 19, 20, 30]:
-            assert education_cost(0, age, 0.025) == 0.0
 
 
 # =============================================================================
@@ -464,8 +431,13 @@ class TestCgtCostBaseIndexation:
         asset = {"val": 200_000.0, "basis": 100_000.0}
         # Old behaviour (nominal gain): gain = 200k-100k = 100k, CGT=30k
         # New behaviour with factor=1.0: same
-        remain, _tax, _nofloor = sell_assets(asset.copy(), 50_000, cgt_on=True, weighted_marginal_rate=0.30,
-                             cumulative_inflation_factor=1.0)
+        remain, _tax, _nofloor = sell_assets(
+            asset.copy(),
+            50_000,
+            cgt_on=True,
+            weighted_marginal_rate=0.30,
+            cumulative_inflation_factor=1.0,
+        )
         assert remain == 0.0, f"Expected 0, got {remain}"
 
     def test_sell_assets_indexation_reduces_cgt(self) -> None:
@@ -475,7 +447,7 @@ class TestCgtCostBaseIndexation:
         Net proceeds = 200k - 27k = 173k.
         Old nominal: CGT = (200k-100k)*0.30 = 30k.  Net = 170k.
         So with indexation, 3k more net proceeds from same sale.
-        
+
         To net 50k after CGT:
         Old: gross_needed = 50k / (1 - (gain_frac=0.5)*0.30) = 50/0.85 = 58,824
         New: indexed_gain_frac = (200k - 110k)/200k = 0.45
@@ -483,19 +455,30 @@ class TestCgtCostBaseIndexation:
              gross_needed = 50k / (1 - 0.135) = 50/0.865 = 57,803
         """
         import copy
+
         asset = {"val": 200_000.0, "basis": 100_000.0}
         asset_old = copy.deepcopy(asset)
         asset_new = copy.deepcopy(asset)
 
         # Old behaviour (no indexation)
-        sell_assets(asset_old, 50_000, cgt_on=True, weighted_marginal_rate=0.30,
-                    cumulative_inflation_factor=1.0)
+        sell_assets(
+            asset_old,
+            50_000,
+            cgt_on=True,
+            weighted_marginal_rate=0.30,
+            cumulative_inflation_factor=1.0,
+        )
         old_basis_remaining = asset_old["basis"]
         old_val_remaining = asset_old["val"]
 
         # New behaviour with indexation
-        sell_assets(asset_new, 50_000, cgt_on=True, weighted_marginal_rate=0.30,
-                    cumulative_inflation_factor=1.1)
+        sell_assets(
+            asset_new,
+            50_000,
+            cgt_on=True,
+            weighted_marginal_rate=0.30,
+            cumulative_inflation_factor=1.1,
+        )
         new_basis_remaining = asset_new["basis"]
         new_val_remaining = asset_new["val"]
 
@@ -529,8 +512,13 @@ class TestCgtCostBaseIndexation:
         """
         inf_factor = (1.03) ** 10  # ≈ 1.3439
         asset = {"val": 200_000.0, "basis": 100_000.0}
-        result, _tax, _nofloor = sell_assets(asset, 200_000, cgt_on=True, weighted_marginal_rate=0.30,
-                             cumulative_inflation_factor=inf_factor)
+        result, _tax, _nofloor = sell_assets(
+            asset,
+            200_000,
+            cgt_on=True,
+            weighted_marginal_rate=0.30,
+            cumulative_inflation_factor=inf_factor,
+        )
         # After selling the full asset for $200k:
         # Val should be 0 (all sold)
         assert asset["val"] == 0.0
@@ -539,15 +527,15 @@ class TestCgtCostBaseIndexation:
         # remain should be 200k - net_proceeds
         net_proceeds = 200_000 - result
         # Net proceeds should be ~180,318
-        assert abs(net_proceeds - 180_318) < 100, (
-            f"Expected net ~$180,318, got ${net_proceeds:,.0f}"
-        )
+        assert (
+            abs(net_proceeds - 180_318) < 100
+        ), f"Expected net ~$180,318, got ${net_proceeds:,.0f}"
         # The difference from old nominal ($170k net) should be ~$10,318
         old_net = 200_000 - (200_000 - 100_000) * 0.30  # = 170_000
         improvement = net_proceeds - old_net
-        assert improvement > 10_000, (
-            f"Expected >$10k improvement over nominal, got ${improvement:,.0f}"
-        )
+        assert (
+            improvement > 10_000
+        ), f"Expected >$10k improvement over nominal, got ${improvement:,.0f}"
 
 
 # =============================================================================
@@ -561,6 +549,7 @@ class TestMarginalRate:
     def test_known_brackets(self) -> None:
         """Confirm marginal_rate returns the correct bracket for known incomes."""
         from primitives import marginal_rate
+
         # 0 income = 0% marginal rate (tax-free threshold)
         assert marginal_rate(0.0) == 0.0
         # Below 18,200 = 0%
@@ -577,6 +566,7 @@ class TestMarginalRate:
     def test_uses_module_brackets_not_hardcoded(self) -> None:
         """marginal_rate uses the same BRACKETS module-level constant."""
         from primitives import marginal_rate
+
         # Call with default brackets — should match BRACKETS
         rate_at_100k = marginal_rate(100_000)
         # Correct marginal rate for $100k = 0.30 (45-135k bracket)
@@ -591,9 +581,9 @@ class TestSellAssetsPhase2:
         produces same result as old cgt_rate=0.30.
         """
         asset = {"val": 200_000.0, "basis": 100_000.0}
-        remain, _tax, _nofloor = sell_assets(asset, 50_000, cgt_on=True,
-                             weighted_marginal_rate=0.30,
-                             cumulative_inflation_factor=1.0)
+        remain, _tax, _nofloor = sell_assets(
+            asset, 50_000, cgt_on=True, weighted_marginal_rate=0.30, cumulative_inflation_factor=1.0
+        )
         # Same as old: net_proceeds=50k, val was 200k, 58,824 sold
         assert remain == 0.0
         assert asset["val"] == 200_000 - 50_000 / (1 - 0.5 * 0.30)  # ~141,176
@@ -615,6 +605,7 @@ class TestSellAssetsPhase2:
         CGT = $22,500.  Net = $177,500.  Checks the floor adds $15k tax.
         """
         from primitives import marginal_rate
+
         # E1: zero income → floor kicks in
         e1_mr = max(marginal_rate(0.0), 0.30)  # = 0.30
         # E2: high income → own rate
@@ -626,20 +617,25 @@ class TestSellAssetsPhase2:
         # Now test through sell_assets
         asset = {"val": 200_000.0, "basis": 100_000.0}
         # Sell full asset
-        result, _tax, _nofloor = sell_assets(asset, 200_000, cgt_on=True,
-                             weighted_marginal_rate=weighted,
-                             cumulative_inflation_factor=1.0)
+        result, _tax, _nofloor = sell_assets(
+            asset,
+            200_000,
+            cgt_on=True,
+            weighted_marginal_rate=weighted,
+            cumulative_inflation_factor=1.0,
+        )
         net_proceeds = 200_000 - result
         # Expected: real_gain = 100k, CGT = 100k * 0.375 = 37.5k
         expected_net = 200_000 - 100_000 * 0.375  # = 162,500
-        assert abs(net_proceeds - expected_net) < 100, (
-            f"Expected net ${expected_net:,.0f}, got ${net_proceeds:,.0f}"
-        )
+        assert (
+            abs(net_proceeds - expected_net) < 100
+        ), f"Expected net ${expected_net:,.0f}, got ${net_proceeds:,.0f}"
 
     def test_floor_no_effect_when_both_high_income(self) -> None:
         """When both owners have marginal rates above 30%, the floor
         doesn't change the outcome."""
         from primitives import marginal_rate
+
         e1_mr = max(marginal_rate(200_000), 0.30)  # 0.45
         e2_mr = max(marginal_rate(180_000), 0.30)  # 0.37 (135k-190k bracket)
         # Without floor: same rates
@@ -660,31 +656,35 @@ class TestSellAssetsPhase2:
 
         # Phase 1 only (weighted_marginal_rate=0.30, old behaviour)
         asset = {"val": 200_000.0, "basis": 100_000.0}
-        result_p1, _tax1, _nf1 = sell_assets(asset, 200_000, cgt_on=True,
-                                weighted_marginal_rate=0.30,
-                                cumulative_inflation_factor=inf_factor)
+        result_p1, _tax1, _nf1 = sell_assets(
+            asset,
+            200_000,
+            cgt_on=True,
+            weighted_marginal_rate=0.30,
+            cumulative_inflation_factor=inf_factor,
+        )
         net_p1 = 200_000 - result_p1
 
         # Same scenario with Phase 2 floor at 37.5%
         asset2 = {"val": 200_000.0, "basis": 100_000.0}
-        result_p2, _tax2, _nf2 = sell_assets(asset2, 200_000, cgt_on=True,
-                                weighted_marginal_rate=0.375,
-                                cumulative_inflation_factor=inf_factor)
+        result_p2, _tax2, _nf2 = sell_assets(
+            asset2,
+            200_000,
+            cgt_on=True,
+            weighted_marginal_rate=0.375,
+            cumulative_inflation_factor=inf_factor,
+        )
         net_p2 = 200_000 - result_p2
 
         # Phase 1 net ≈ $180,318
-        assert abs(net_p1 - 180_318) < 100, (
-            f"Phase 1 net expected ~$180,318, got ${net_p1:,.0f}"
-        )
+        assert abs(net_p1 - 180_318) < 100, f"Phase 1 net expected ~$180,318, got ${net_p1:,.0f}"
         # Phase 2 net < Phase 1 net (higher rate = more tax = less net)
-        assert net_p2 < net_p1, (
-            f"Phase 2 net ${net_p2:,.0f} should be < Phase 1 ${net_p1:,.0f}"
-        )
+        assert net_p2 < net_p1, f"Phase 2 net ${net_p2:,.0f} should be < Phase 1 ${net_p1:,.0f}"
         # The real_gain is the same — confirm via basis consumed
         # Phase 1 & 2 both consumed same basis (same sale amount)
-        assert abs(asset["basis"] - asset2["basis"]) < 1.0, (
-            "Basis consumed should be identical (same sale amount)"
-        )
+        assert (
+            abs(asset["basis"] - asset2["basis"]) < 1.0
+        ), "Basis consumed should be identical (same sale amount)"
 
 
 class TestOwnershipValidation:
@@ -693,6 +693,7 @@ class TestOwnershipValidation:
     def test_default_ownership_single_owner(self) -> None:
         """Default ownership {0: 1.0} sums to 1.0."""
         from models import InvestmentAccount
+
         acct = InvestmentAccount(label="T", market_value=100_000, cost_basis=50_000)
         assert sum(acct.ownership.values()) == 1.0
         assert acct.ownership == {0: 1.0}
@@ -700,8 +701,11 @@ class TestOwnershipValidation:
     def test_multi_owner_ownership_sum(self) -> None:
         """Ownership dict sums to 1.0."""
         from models import InvestmentAccount
+
         acct = InvestmentAccount(
-            label="Joint", market_value=100_000, cost_basis=50_000,
+            label="Joint",
+            market_value=100_000,
+            cost_basis=50_000,
             ownership={0: 0.6, 1: 0.4},
         )
         assert abs(sum(acct.ownership.values()) - 1.0) < 0.001
@@ -709,19 +713,29 @@ class TestOwnershipValidation:
     def test_deserialise_legacy_no_ownership_field(self) -> None:
         """Legacy profile without ownership field defaults to {0: 1.0}."""
         from models import _deserialise_account
+
         data = {
-            "label": "T", "market_value": 100_000, "cost_basis": 50_000,
-            "asset_class": "equity", "is_offset": False, "cgt_rate": 0.30,
+            "label": "T",
+            "market_value": 100_000,
+            "cost_basis": 50_000,
+            "asset_class": "equity",
+            "is_offset": False,
+            "cgt_rate": 0.30,
         }
         acct = _deserialise_account(data)
         assert acct.ownership == {0: 1.0}
 
     def test_serialise_deserialise_roundtrip(self) -> None:
         """Ownership survives serialise/deserialise roundtrip."""
-        from models import _serialise_account, _deserialise_account
-        original = dict = {
-            "label": "Joint", "market_value": 200_000, "cost_basis": 100_000,
-            "asset_class": "equity", "is_offset": False, "cgt_rate": 0.30,
+        from models import _deserialise_account, _serialise_account
+
+        original = {
+            "label": "Joint",
+            "market_value": 200_000,
+            "cost_basis": 100_000,
+            "asset_class": "equity",
+            "is_offset": False,
+            "cgt_rate": 0.30,
             "ownership": {"0": 0.4, "1": 0.6},
         }
         acct = _deserialise_account(original)
@@ -733,19 +747,25 @@ class TestOwnershipValidation:
     def test_three_equal_owners(self) -> None:
         """Three owners, equal shares — general case beyond 50/50."""
         from models import InvestmentAccount
+
         acct = InvestmentAccount(
-            label="Three-way", market_value=300_000, cost_basis=150_000,
-            ownership={0: 1/3, 1: 1/3, 2: 1/3},
+            label="Three-way",
+            market_value=300_000,
+            cost_basis=150_000,
+            ownership={0: 1 / 3, 1: 1 / 3, 2: 1 / 3},
         )
         assert abs(sum(acct.ownership.values()) - 1.0) < 0.001
         for ei in (0, 1, 2):
-            assert abs(acct.ownership[ei] - 1/3) < 0.001
+            assert abs(acct.ownership[ei] - 1 / 3) < 0.001
 
     def test_three_unequal_owners(self) -> None:
         """Three owners, unequal shares."""
         from models import InvestmentAccount
+
         acct = InvestmentAccount(
-            label="Split", market_value=300_000, cost_basis=150_000,
+            label="Split",
+            market_value=300_000,
+            cost_basis=150_000,
             ownership={0: 0.5, 1: 0.3, 2: 0.2},
         )
         assert abs(sum(acct.ownership.values()) - 1.0) < 0.001
@@ -758,8 +778,11 @@ class TestOwnershipValidation:
         than including a 0.0 * rate term that would dilute the average.
         """
         from models import InvestmentAccount
+
         acct = InvestmentAccount(
-            label="E1+E2 only", market_value=200_000, cost_basis=100_000,
+            label="E1+E2 only",
+            market_value=200_000,
+            cost_basis=100_000,
             ownership={0: 0.0, 1: 0.7, 2: 0.3},
         )
         assert abs(sum(acct.ownership.values()) - 1.0) < 0.001
@@ -768,24 +791,36 @@ class TestOwnershipValidation:
     def test_malformed_ownership_raises(self) -> None:
         """Ownership shares that don't sum to 1.0 raise ValueError."""
         from models import _deserialise_account as _da
+
         data = {
-            "label": "Bad", "market_value": 100_000, "cost_basis": 50_000,
-            "asset_class": "equity", "is_offset": False, "cgt_rate": 0.30,
+            "label": "Bad",
+            "market_value": 100_000,
+            "cost_basis": 50_000,
+            "asset_class": "equity",
+            "is_offset": False,
+            "cgt_rate": 0.30,
             "ownership": {"0": 0.5, "1": 0.3},  # sums to 0.8
         }
         import pytest
+
         with pytest.raises(ValueError, match="ownership sums to 0.8000"):
             _da(data)
 
     def test_malformed_ownership_raises_over_100(self) -> None:
         """Ownership shares > 1.0 also raise."""
         from models import _deserialise_account as _da
+
         data = {
-            "label": "Over", "market_value": 100_000, "cost_basis": 50_000,
-            "asset_class": "equity", "is_offset": False, "cgt_rate": 0.30,
+            "label": "Over",
+            "market_value": 100_000,
+            "cost_basis": 50_000,
+            "asset_class": "equity",
+            "is_offset": False,
+            "cgt_rate": 0.30,
             "ownership": {"0": 0.6, "1": 0.5},  # sums to 1.1
         }
         import pytest
+
         with pytest.raises(ValueError, match="ownership sums to"):
             _da(data)
 
@@ -807,7 +842,8 @@ class TestOwnershipValidation:
           CGT = $19,500.  Net = $180,500.  Floor adds $15k tax.
         """
         from primitives import marginal_rate, sell_assets
-        e1 = max(marginal_rate(0), 0.30)       # 0.00 → 0.30
+
+        e1 = max(marginal_rate(0), 0.30)  # 0.00 → 0.30
         e2 = max(marginal_rate(200_000), 0.30)  # 0.45
         e3 = max(marginal_rate(100_000), 0.30)  # 0.30
         weighted = 0.5 * e1 + 0.3 * e2 + 0.2 * e3
@@ -815,14 +851,18 @@ class TestOwnershipValidation:
 
         # Now test through sell_assets
         asset = {"val": 200_000.0, "basis": 100_000.0}
-        result, _tax, _nofloor = sell_assets(asset, 200_000, cgt_on=True,
-                             weighted_marginal_rate=weighted,
-                             cumulative_inflation_factor=1.0)
+        result, _tax, _nofloor = sell_assets(
+            asset,
+            200_000,
+            cgt_on=True,
+            weighted_marginal_rate=weighted,
+            cumulative_inflation_factor=1.0,
+        )
         net_proceeds = 200_000 - result
         expected_net = 200_000 - 100_000 * 0.345  # = 165,500
-        assert abs(net_proceeds - expected_net) < 100, (
-            f"Expected net ${expected_net:,.0f}, got ${net_proceeds:,.0f}"
-        )
+        assert (
+            abs(net_proceeds - expected_net) < 100
+        ), f"Expected net ${expected_net:,.0f}, got ${net_proceeds:,.0f}"
 
 
 class TestPtIncomeInMarginalRate:
@@ -836,23 +876,31 @@ class TestPtIncomeInMarginalRate:
 
         Without PT inclusion: 40k → 16% marginal rate (wrong by 21pp).
         """
-        from simulation import run_monte_carlo
-        from models import Earner, Household, SimulationInputs
         import random
+
+        from models import Earner, Household, SimulationInputs
+        from simulation import run_monte_carlo
 
         random.seed(42)
         e = Earner(
-            label="E1", salary=40_000, super_balance=50_000,
+            label="E1",
+            salary=40_000,
+            super_balance=50_000,
             salary_growth_rate=0.0,  # flat real
-            retirement_age=50, super_access_age=60,
+            retirement_age=50,
+            super_access_age=60,
             employment_type="self_employed",  # PT is their bridge income
-            pt_days_per_week=1.0, pt_start_age=37, pt_end_age=55,
+            pt_days_per_week=1.0,
+            pt_start_age=37,
+            pt_end_age=55,
             personal_super_contributions_total_p_a=0,
         )
         h = Household(earners=(e,), base_living_expenses=100_000)
         inputs = SimulationInputs(
-            simulation_start_age=37, n_iterations=10,
-            inflation=0.0, cgt_on_drawdowns=True,
+            simulation_start_age=37,
+            n_iterations=10,
+            inflation=0.0,
+            cgt_on_drawdowns=True,
         )
         res = run_monte_carlo(h, inputs)
         assert isinstance(res.p_success, float)
@@ -862,9 +910,11 @@ class TestPtIncomeInMarginalRate:
     def test_zero_pt_doesnt_affect_taxable(self) -> None:
         """Earner with pt_days_per_week=0 has no PT gross added."""
         from simulation import _SimulationState
+
         # _SimulationState has earner_taxable_incomes field
         state = _SimulationState(
-            age=37, year=0,
+            age=37,
+            year=0,
             super_balances=[100_000],
             earner_taxable_incomes=[0.0],
         )
@@ -877,6 +927,7 @@ class TestUiSkipConditions:
     def test_single_earner_no_prompt(self) -> None:
         """Single-earner household: ownership defaults to {0: 1.0}."""
         from models import InvestmentAccount
+
         # Call with num_earners=1 — should not prompt, return default
         # We can't fully test the interactive prompt without mocking,
         # but we can verify the default is correct
@@ -886,10 +937,14 @@ class TestUiSkipConditions:
     def test_offset_account_no_prompt(self) -> None:
         """Offset account: ownership defaults to {0: 1.0}, prompt skipped."""
         from models import InvestmentAccount
+
         # Offset accounts don't trigger CGT, ownership is irrelevant
         acct = InvestmentAccount(
-            label="Offset", market_value=100_000, cost_basis=100_000,
-            is_offset=True, cgt_rate=0.0,
+            label="Offset",
+            market_value=100_000,
+            cost_basis=100_000,
+            is_offset=True,
+            cgt_rate=0.0,
         )
         assert acct.ownership == {0: 1.0}
         assert acct.is_offset is True

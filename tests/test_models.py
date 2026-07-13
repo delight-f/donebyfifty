@@ -36,7 +36,6 @@ class TestEarner:
         assert e.super_access_age == 60
         assert e.sg_rate == 0.12
         assert e.employment_type == "employed"
-        assert e.is_employed is True
         assert e.pt_days_per_week == 0.0
 
     def test_immutable(self) -> None:
@@ -45,8 +44,8 @@ class TestEarner:
             e.salary = 60_000.0  # type: ignore[misc]
 
     def test_non_working_earner(self) -> None:
-        e = Earner(is_employed=False, salary=0.0, super_balance=50_000.0)
-        assert e.is_employed is False
+        e = Earner(employment_type="not_employed", salary=0.0, super_balance=50_000.0)
+        assert e.employment_type == "not_employed"
         assert e.salary == 0.0
 
     def test_part_time_params(self) -> None:
@@ -148,18 +147,6 @@ class TestInvestmentAccount:
         assert a.is_offset is True
         assert a.cgt_rate == 0.0
 
-    def test_has_gain(self) -> None:
-        a = InvestmentAccount(market_value=150_000.0, cost_basis=100_000.0)
-        assert a.has_gain is True
-
-    def test_no_gain(self) -> None:
-        a = InvestmentAccount(market_value=80_000.0, cost_basis=100_000.0)
-        assert a.has_gain is False
-
-    def test_exact_basis(self) -> None:
-        a = InvestmentAccount(market_value=100_000.0, cost_basis=100_000.0)
-        assert a.has_gain is False
-
     def test_uk_jurisdiction(self) -> None:
         a = InvestmentAccount(label="UK ETFs", tax_jurisdiction="uk", cgt_rate=0.30)
         assert a.tax_jurisdiction == "uk"
@@ -176,7 +163,6 @@ class TestHousehold:
         assert h.num_earners == 1
         assert h.num_children == 0
         assert h.num_mortgages == 0
-        assert h.num_investment_accounts == 0
         assert h.base_living_expenses == 60_000.0
         assert h.retirement_target == 80_000.0
 
@@ -208,29 +194,6 @@ class TestHousehold:
             investment_accounts=(offset, equities),
         )
         assert h.num_mortgages == 1
-        assert h.num_investment_accounts == 2
-        assert h.total_mortgage_principal == 600_000.0
-        assert h.total_bridge_assets == 200_000.0  # only equities
-        assert h.total_offset_balance == 50_000.0
-
-    def test_min_retirement_age(self) -> None:
-        e1 = Earner(retirement_age=55)
-        e2 = Earner(retirement_age=60)
-        h = Household(earners=(e1, e2))
-        assert h.min_retirement_age == 55
-
-    def test_min_super_access_age(self) -> None:
-        e1 = Earner(super_access_age=60)
-        e2 = Earner(super_access_age=55)
-        h = Household(earners=(e1, e2))
-        assert h.min_super_access_age == 55
-
-    def test_empty_earners(self) -> None:
-        """Should not crash with zero earners (edge case)."""
-        h = Household(earners=())
-        assert h.num_earners == 0
-        assert h.min_retirement_age == 999
-        assert h.min_super_access_age == 999
 
 
 # =============================================================================
@@ -244,7 +207,6 @@ class TestSimulationInputs:
         assert s.n_iterations == 5_000
         assert s.inflation == 0.025
         assert s.simulation_start_age == 37
-        assert s.simulation_end_age == 72
         assert s.cgt_on_drawdowns is True
         assert s.sell_strategy == "waterfall"
         assert s.sell_order == ()
@@ -409,7 +371,6 @@ class TestProfileSerialisation:
         p1 = Profile(profile_name="Two Accounts", inputs=inputs)
         d = p1.to_dict()
         p2 = Profile.from_dict(d)
-        assert p2.inputs.household.num_investment_accounts == 2
         assert p2.inputs.household.investment_accounts[1].is_offset is True
 
     def test_roundtrip_with_schedule(self) -> None:

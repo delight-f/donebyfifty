@@ -7,7 +7,10 @@ frozen (immutable) to prevent accidental mutation.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from simulation import ScenarioComparisonResult
 
 # =============================================================================
 # AUSTRALIAN PRESERVATION AGE LOOKUP
@@ -110,14 +113,7 @@ class Earner:
     ``"not_employed"``: no salary income, no SG. Still eligible for
     part-time income and non-concessional contributions.
 
-    Retained for backward compatibility: old profiles with ``is_employed``
-    are mapped at deserialisation time. ``is_employed=True`` maps to
-    ``"employed"``, ``is_employed=False`` maps to ``"not_employed"``.
     """
-    is_employed: bool = True
-    """Legacy flag kept for backward compatibility. Use ``employment_type``
-    instead for new code. Old profiles without ``employment_type`` are
-    mapped from this flag at deserialisation time."""
     self_employed_income: float = 0.0
     """Annual self-employed / business income in today's dollars.
 
@@ -223,10 +219,19 @@ class Earner:
     super_mean_override: float | None = None
     """Override mean return for this earner's super. If None, uses the
     asset class lookup from ``super_asset_class``.
+
+    Note: The defaults these overrides fall back to (``EQ_MEAN``, ``EQ_STD``,
+    etc. in ``primitives.py``) have mixed provenance. Equity mean is sourced
+    (Credit Suisse / UBS Yearbook); all standard deviations and most other
+    means are unsourced placeholders. See ``primitives.py`` module docstring
+    and per-constant comments for full provenance details.
     """
     super_std_override: float | None = None
     """Override std deviation for this earner's super. Only used when
     ``super_mean_override`` is also set.
+
+    Same provenance caveat as ``super_mean_override`` — default fallback
+    standard deviations are unsourced placeholders.
     """
 
     def __post_init__(self) -> None:
@@ -375,7 +380,14 @@ class InvestmentAccount:
     is_offset: bool = False
     fee_rate: float = 0.0
     interest_rate: float = 0.0
-    """Annual interest rate override. 0.0 (default) means use asset class returns."""
+    """Expected annual return override for this account (decimal).
+
+    0.0 (default) means use the asset class's default mean and volatility.
+    When set, the return is lognormal with this user-specified mean and the
+    asset class's standard deviation and equity correlation — NOT a fixed
+    deterministic rate.  For example, an equity account with
+    ``interest_rate=0.08`` gets ~8% expected return with ~15% volatility.
+    """
     ownership: dict[int, float] = field(default_factory=lambda: {0: 1.0})
     """Fractional ownership per earner index (matches ``Household.earners`` tuple).
 
@@ -387,11 +399,6 @@ class InvestmentAccount:
     order is invariant, matching the indexing of ``super_balances[]``,
     ``earner_taxable_incomes[]``, etc.
     """
-
-    @property
-    def has_gain(self) -> bool:
-        """Whether the account has an unrealised capital gain."""
-        return self.market_value > self.cost_basis
 
 
 @dataclass(frozen=True)
@@ -425,39 +432,9 @@ class Household:
         return len(self.mortgages)
 
     @property
-    def num_investment_accounts(self) -> int:
-        """Number of investment accounts."""
-        return len(self.investment_accounts)
-
-    @property
     def total_super(self) -> float:
         """Sum of all earners' super balances."""
         return sum(e.super_balance for e in self.earners)
-
-    @property
-    def total_bridge_assets(self) -> float:
-        """Sum of all non-super, non-offset investment accounts."""
-        return sum(a.market_value for a in self.investment_accounts if not a.is_offset)
-
-    @property
-    def total_offset_balance(self) -> float:
-        """Sum of all offset account balances."""
-        return sum(a.market_value for a in self.investment_accounts if a.is_offset)
-
-    @property
-    def total_mortgage_principal(self) -> float:
-        """Sum of all mortgage principals."""
-        return sum(m.principal for m in self.mortgages)
-
-    @property
-    def min_retirement_age(self) -> int:
-        """Earliest retirement age across all earners."""
-        return min(e.retirement_age for e in self.earners) if self.earners else 999
-
-    @property
-    def min_super_access_age(self) -> int:
-        """Earliest super access age across all earners."""
-        return min(e.super_access_age for e in self.earners) if self.earners else 999
 
 
 # =============================================================================
@@ -473,11 +450,6 @@ class SimulationInputs:
     n_iterations: int = 5_000
     inflation: float = 0.025
     simulation_start_age: int = 37
-    simulation_end_age: int = 72
-    """Ignored in bridge mode; the simulation always ends at min(super_access_age).
-
-    Retained for backward compatibility with v1/v2 profiles on disk.
-    """
     cgt_on_drawdowns: bool = True
     sell_strategy: str = "waterfall"
     sell_order: tuple[str, ...] = ()
@@ -711,9 +683,16 @@ class SimulationResults:
             "bridge_by_age_p90": list(self.bridge_by_age_p90),
             "bridge_by_age_p95": list(self.bridge_by_age_p95),
             "mortgage_by_age_ages": list(self.mortgage_by_age_ages),
-            "mortgage_by_age": {k: {pk: list(pv) for pk, pv in v.items()} for k, v in self.mortgage_by_age.items()},
-            "offset_by_age": {k: {pk: list(pv) for pk, pv in v.items()} for k, v in self.offset_by_age.items()},
-            "mortgage_rate_by_age": {k: {pk: list(pv) for pk, pv in v.items()} for k, v in self.mortgage_rate_by_age.items()},
+            "mortgage_by_age": {
+                k: {pk: list(pv) for pk, pv in v.items()} for k, v in self.mortgage_by_age.items()
+            },
+            "offset_by_age": {
+                k: {pk: list(pv) for pk, pv in v.items()} for k, v in self.offset_by_age.items()
+            },
+            "mortgage_rate_by_age": {
+                k: {pk: list(pv) for pk, pv in v.items()}
+                for k, v in self.mortgage_rate_by_age.items()
+            },
         }
 
     @classmethod
@@ -795,12 +774,8 @@ class ResultsSession:
     household: Household
     inputs: SimulationInputs
 
-    # Work Item 1 — Per-year trajectory data (populated on first access)
-    trajectories: list | None = None
-    """Populated by trajectory computation; format TBD by Work Item 1."""
-
     # Work Item 6 — Scenario comparisons (populated on demand)
-    scenarios: dict[str, SimulationResults] | None = None
+    scenarios: dict[str, ScenarioComparisonResult] | None = None
 
     # Work Item 3 — Sequencing risk analysis (populated on demand)
     sequencing: Any | None = None
@@ -875,7 +850,6 @@ def _serialise_earner(earner: Earner) -> dict[str, Any]:
         "super_access_age": earner.super_access_age,
         "sg_rate": earner.sg_rate,
         "employment_type": earner.employment_type,
-        "is_employed": earner.is_employed,
         "pt_days_per_week": earner.pt_days_per_week,
         "pt_rate_mode": earner.pt_rate_mode,
         "pt_salary_pct": earner.pt_salary_pct,
@@ -903,7 +877,6 @@ def _deserialise_earner(data: dict[str, Any]) -> Earner:
     # Only use is_employed fallback when employment_type is NOT present
     if "employment_type" in data:
         emp_type = data["employment_type"]
-        is_emp = emp_type == "employed"
     else:
         # Legacy profile: map is_employed bool -> employment_type
         is_emp = data.get("is_employed", True)
@@ -918,7 +891,6 @@ def _deserialise_earner(data: dict[str, Any]) -> Earner:
         super_access_age=data.get("super_access_age", 60),
         sg_rate=data.get("sg_rate", 0.12),
         employment_type=emp_type,
-        is_employed=is_emp,
         pt_days_per_week=data.get("pt_days_per_week", 0.0),
         pt_start_age=data.get("pt_start_age", -1),
         pt_end_age=data.get("pt_end_age", 65),
@@ -1038,7 +1010,6 @@ def _serialise_inputs(inputs: SimulationInputs) -> dict[str, Any]:
         "n_iterations": inputs.n_iterations,
         "inflation": inputs.inflation,
         "simulation_start_age": inputs.simulation_start_age,
-        "simulation_end_age": inputs.simulation_end_age,
         "cgt_on_drawdowns": inputs.cgt_on_drawdowns,
         "sell_strategy": inputs.sell_strategy,
         "sell_order": list(inputs.sell_order),
@@ -1070,16 +1041,102 @@ def _serialise_inputs(inputs: SimulationInputs) -> dict[str, Any]:
     }
 
 
+def _repair_offset_links(
+    mortgages: tuple[MortgageAccount, ...],
+    accounts: tuple[InvestmentAccount, ...],
+) -> tuple[MortgageAccount, ...]:
+    """Rebuild mortgage→offset linkages for loaded profiles.
+
+    Called at deserialisation time to repair profiles that were saved
+    before ``_link_offsets_to_mortgages()`` populated ``offset_accounts``
+    on each mortgage.  Without this step the simulation ignores offset
+    balances during mortgage amortisation, leaving a large fraction of
+    the loan outstanding at horizon.
+
+    Strategy:
+    * Single-mortgage households: link all ``is_offset`` accounts to that
+      mortgage unconditionally (the common case).
+    * Multi-mortgage households: only rebuild links when all mortgages
+      have an empty ``offset_accounts`` AND there is exactly one offset
+      account — link it to the first mortgage.  In all other multi-
+      mortgage cases we cannot guess the intended mapping and leave the
+      data as-is (the interactive wizard is required to set up the links).
+    """
+    if not mortgages or not accounts:
+        return mortgages
+
+    offset_accounts = [a for a in accounts if a.is_offset]
+    if not offset_accounts:
+        return mortgages  # nothing to link
+
+    offset_labels = tuple(a.label for a in offset_accounts)
+
+    if len(mortgages) == 1:
+        # Single mortgage: all offsets belong to it
+        m = mortgages[0]
+        if set(m.offset_accounts) != set(offset_labels):
+            repaired = MortgageAccount(
+                label=m.label,
+                principal=m.principal,
+                interest_rate=m.interest_rate,
+                monthly_payment=m.monthly_payment,
+                offset_accounts=offset_labels,
+                offset_reserve_mode=m.offset_reserve_mode,
+                offset_reserve_floor=m.offset_reserve_floor,
+                loan_term_end_age=m.loan_term_end_age,
+                interest_rate_stochastic=m.interest_rate_stochastic,
+                interest_rate_vol=m.interest_rate_vol,
+                interest_rate_kappa=m.interest_rate_kappa,
+                interest_rate_theta=m.interest_rate_theta,
+                interest_rate_corr=m.interest_rate_corr,
+            )
+            return (repaired,)
+        return mortgages
+
+    # Multi-mortgage: attempt repair only when simple enough to guess
+    all_empty = all(len(m.offset_accounts) == 0 for m in mortgages)
+    if all_empty and len(offset_accounts) == 1:
+        # One offset, multiple mortgages — link to first as best guess
+        result: list[MortgageAccount] = []
+        for i, m in enumerate(mortgages):
+            if i == 0:
+                result.append(
+                    MortgageAccount(
+                        label=m.label,
+                        principal=m.principal,
+                        interest_rate=m.interest_rate,
+                        monthly_payment=m.monthly_payment,
+                        offset_accounts=(offset_labels[0],),
+                        offset_reserve_mode=m.offset_reserve_mode,
+                        offset_reserve_floor=m.offset_reserve_floor,
+                        loan_term_end_age=m.loan_term_end_age,
+                        interest_rate_stochastic=m.interest_rate_stochastic,
+                        interest_rate_vol=m.interest_rate_vol,
+                        interest_rate_kappa=m.interest_rate_kappa,
+                        interest_rate_theta=m.interest_rate_theta,
+                        interest_rate_corr=m.interest_rate_corr,
+                    )
+                )
+            else:
+                result.append(m)
+        return tuple(result)
+
+    return mortgages  # too ambiguous; leave for interactive repair
+
+
 def _deserialise_inputs(data: dict[str, Any]) -> SimulationInputs:
     household_data = data.get("household", {})
+
+    accounts = tuple(_deserialise_account(a) for a in household_data.get("investment_accounts", []))
+    mortgages_raw = tuple(_deserialise_mortgage(m) for m in household_data.get("mortgages", []))
+    # Repair offset→mortgage links that may be missing in older profiles
+    mortgages = _repair_offset_links(mortgages_raw, accounts)
 
     household = Household(
         earners=tuple(_deserialise_earner(e) for e in household_data.get("earners", [])),
         children=tuple(_deserialise_child(c) for c in household_data.get("children", [])),
-        mortgages=tuple(_deserialise_mortgage(m) for m in household_data.get("mortgages", [])),
-        investment_accounts=tuple(
-            _deserialise_account(a) for a in household_data.get("investment_accounts", [])
-        ),
+        mortgages=mortgages,
+        investment_accounts=accounts,
         base_living_expenses=household_data.get("base_living_expenses", 60_000.0),
         retirement_target=household_data.get("retirement_target", 80_000.0),
     )
@@ -1089,7 +1146,6 @@ def _deserialise_inputs(data: dict[str, Any]) -> SimulationInputs:
         n_iterations=data.get("n_iterations", 5_000),
         inflation=data.get("inflation", 0.025),
         simulation_start_age=data.get("simulation_start_age", 37),
-        simulation_end_age=data.get("simulation_end_age", 72),
         cgt_on_drawdowns=data.get("cgt_on_drawdowns", True),
         sell_strategy=data.get("sell_strategy", "waterfall"),
         sell_order=tuple(data.get("sell_order", [])),
@@ -1265,7 +1321,6 @@ def _upgrade_v1_profile(data: dict[str, Any]) -> dict[str, Any]:
             "n_iterations": inputs.get("n_iterations", 5_000),
             "inflation": inputs.get("inflation", 0.025),
             "simulation_start_age": inputs.get("simulation_start_age", 37),
-            "simulation_end_age": inputs.get("simulation_end_age", 72),
             "cgt_on_drawdowns": inputs.get("cgt_on_drawdowns", True),
             "sell_strategy": "waterfall",
             "sell_order": [],

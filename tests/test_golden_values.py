@@ -54,6 +54,7 @@ Expected hand calculation (year-by-year):
 
 import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from models import Earner, Household, SimulationInputs
@@ -80,11 +81,10 @@ def test_golden_single_earner() -> None:
     inputs = SimulationInputs(
         n_iterations=1,
         simulation_start_age=60,
-        simulation_end_age=65,
         inflation=0.0,
         cgt_on_drawdowns=False,
         super_fee_rate=0.0,
-        bracket_growth_rate=0.0,       # Fixed brackets
+        bracket_growth_rate=0.0,  # Fixed brackets
         conc_cap_growth_rate=0.0,
         sg_max_base_growth_rate=0.0,
         mls_enabled=False,
@@ -107,7 +107,7 @@ def test_golden_single_earner() -> None:
     # Allow small tolerance for floating point
     tolerance = 1.0
 
-    print(f"Golden-value test results:")
+    print("Golden-value test results:")
     print(f"  Bridge:              ${result.bridge:,.2f}  (expected ~${expected_bridge:,.2f})")
     print(f"  Total super:         ${result.total_super:,.2f}  (expected ~${expected_super:,.2f})")
     print(f"  Super balances:      {[f'${s:,.2f}' for s in result.super_balances]}")
@@ -145,7 +145,7 @@ def test_golden_simple_cgt() -> None:
         market_value=100_000.0,
         cost_basis=70_000.0,
         asset_class="equity",
-        interest_rate=0.07,     # Deterministic 7% return
+        interest_rate=0.07,  # Custom mean 7% return (fixed in deterministic mode)
         cgt_rate=0.30,
         ownership={0: 1.0},
     )
@@ -158,7 +158,6 @@ def test_golden_simple_cgt() -> None:
     inputs = SimulationInputs(
         n_iterations=1,
         simulation_start_age=60,
-        simulation_end_age=65,
         inflation=0.0,
         cgt_on_drawdowns=True,
         super_fee_rate=0.0,
@@ -171,7 +170,7 @@ def test_golden_simple_cgt() -> None:
     result = run_single_trial(household, inputs)
 
     # Verify bridge is positive (simulation completes without error)
-    print(f"Golden-value CGT test results:")
+    print("Golden-value CGT test results:")
     print(f"  Bridge:              ${result.bridge:,.2f}")
     print(f"  Total super:         ${result.total_super:,.2f}")
     print(f"  Min bridge:          ${result.min_bridge:,.2f}")

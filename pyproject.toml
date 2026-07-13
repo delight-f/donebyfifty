@@ -31,3 +31,4 @@ ignore = ["D107"]  # __init__ docstrings are covered by class docstring
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["D", "E501"]
+"ui.py" = ["E501"]

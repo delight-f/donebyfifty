@@ -4,13 +4,12 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-
+from models import Earner, Household, SimulationResults
 from ui import (
-    _display_earner_super_warnings,
     _display_contribution_warnings,
+    _display_earner_super_warnings,
     display_results,
 )
-from models import Household, Earner, SimulationResults
 
 
 class TestDisplayEarnerSuperWarnings:
@@ -47,9 +46,7 @@ class TestDisplayContributionWarnings:
     def test_no_warnings_for_normal_household(self) -> None:
         """No warnings should appear for normal household."""
         household = Household(
-            earners=(
-                Earner(salary=100_000, retirement_age=50),
-            ),
+            earners=(Earner(salary=100_000, retirement_age=50),),
         )
         # Should not raise any exceptions
         _display_contribution_warnings(household, 37)
@@ -57,9 +54,7 @@ class TestDisplayContributionWarnings:
     def test_warning_for_high_income_earner(self) -> None:
         """Warning should appear for high-income earner."""
         household = Household(
-            earners=(
-                Earner(salary=300_000, retirement_age=50),
-            ),
+            earners=(Earner(salary=300_000, retirement_age=50),),
         )
         # Should not raise any exceptions
         _display_contribution_warnings(household, 37)
@@ -68,9 +63,7 @@ class TestDisplayContributionWarnings:
         """Warning should appear when SG exceeds concessional cap."""
         # Very high salary that would cause SG to exceed cap
         household = Household(
-            earners=(
-                Earner(salary=300_000, retirement_age=50),
-            ),
+            earners=(Earner(salary=300_000, retirement_age=50),),
         )
         # Should not raise any exceptions
         _display_contribution_warnings(household, 37)
@@ -82,9 +75,7 @@ class TestDisplayResults:
     def test_display_results_with_warnings(self) -> None:
         """Results should be displayed with contribution warnings."""
         household = Household(
-            earners=(
-                Earner(salary=300_000, retirement_age=50),
-            ),
+            earners=(Earner(salary=300_000, retirement_age=50),),
         )
         results = SimulationResults(
             trials=5000,
@@ -127,15 +118,15 @@ class TestDisplayResults:
         with patch("ui.console") as mock_console:
             display_results(results, start_age=37)
             # Should have a warning about low success probability
-            warnings = [call for call in mock_console.print.call_args_list if "below" in str(call).lower()]
+            warnings = [
+                call for call in mock_console.print.call_args_list if "below" in str(call).lower()
+            ]
             assert len(warnings) > 0
 
     def test_display_results_with_no_warnings(self) -> None:
         """Results should be displayed without warnings for normal household."""
         household = Household(
-            earners=(
-                Earner(salary=100_000, retirement_age=50),
-            ),
+            earners=(Earner(salary=100_000, retirement_age=50),),
         )
         results = SimulationResults(
             trials=5000,
@@ -165,6 +156,7 @@ class TestMonetaryShortcuts:
     def test_parse_k_suffix(self) -> None:
         """Test parsing of k suffix for thousands."""
         from ui import _parse_monetary
+
         assert _parse_monetary("300k") == 300_000.0
         assert _parse_monetary("1.5k") == 1_500.0
         assert _parse_monetary("10k") == 10_000.0
@@ -172,6 +164,7 @@ class TestMonetaryShortcuts:
     def test_parse_m_suffix(self) -> None:
         """Test parsing of m suffix for millions."""
         from ui import _parse_monetary
+
         assert _parse_monetary("1M") == 1_000_000.0
         assert _parse_monetary("2.5M") == 2_500_000.0
         assert _parse_monetary("10M") == 10_000_000.0
@@ -179,12 +172,14 @@ class TestMonetaryShortcuts:
     def test_parse_b_suffix(self) -> None:
         """Test parsing of b suffix for billions."""
         from ui import _parse_monetary
+
         assert _parse_monetary("1B") == 1_000_000_000.0
         assert _parse_monetary("2.5B") == 2_500_000_000.0
 
     def test_parse_plain_numbers(self) -> None:
         """Test parsing of plain numbers without suffix."""
         from ui import _parse_monetary
+
         assert _parse_monetary("1000") == 1_000.0
         assert _parse_monetary("1000.5") == 1_000.5
         assert _parse_monetary("0") == 0.0
@@ -192,6 +187,7 @@ class TestMonetaryShortcuts:
     def test_parse_invalid_input(self) -> None:
         """Test parsing of invalid input returns None."""
         from ui import _parse_monetary
+
         assert _parse_monetary("invalid") is None
         assert _parse_monetary("") is None
         assert _parse_monetary("abc") is None

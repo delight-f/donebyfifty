@@ -15,7 +15,14 @@ from models import (
     SimulationInputs,
 )
 from primitives import EDU_SCHEDULE_TODAY, EQ_MEAN, SUPER_MEAN
-from simulation import run_monte_carlo, run_single_trial
+from simulation import (
+    ScenarioComparisonResult,
+    SequencingRiskResult,
+    run_monte_carlo,
+    run_scenario_comparison,
+    run_sequencing_analysis,
+    run_single_trial,
+)
 
 # =============================================================================
 # HELPERS
@@ -151,7 +158,7 @@ class TestDeterministic:
         bridge_end = min(e.super_access_age for e in h.earners)
         n_years = bridge_end - inputs.simulation_start_age
         eq = [EQ_MEAN] * n_years
-        spr = [SUPER_MEAN] * n_years
+        [SUPER_MEAN] * n_years
         r = run_single_trial(household=h, inputs=inputs, eq_returns=eq)
         assert r.bridge > 0
         assert r.total_super > 0
@@ -163,19 +170,17 @@ class TestDeterministic:
         bridge_end = min(e.super_access_age for e in h55.earners)
         n_years = bridge_end - inputs.simulation_start_age
         eq = [EQ_MEAN] * n_years
-        spr = [SUPER_MEAN] * n_years
+        [SUPER_MEAN] * n_years
 
         r55 = run_single_trial(
             household=h55,
             inputs=inputs,
             eq_returns=eq,
-            
         )
         r50 = run_single_trial(
             household=reference_household(retire_age=50),
             inputs=inputs,
             eq_returns=eq,
-            
         )
         assert r55.bridge > r50.bridge
         assert r55.total_super > r50.total_super
@@ -187,7 +192,7 @@ class TestDeterministic:
         bridge_end = min(e.super_access_age for e in h.earners)
         n_years = bridge_end - inputs.simulation_start_age
         eq = [EQ_MEAN] * n_years
-        spr = [SUPER_MEAN] * n_years
+        [SUPER_MEAN] * n_years
         r = run_single_trial(household=h, inputs=inputs, eq_returns=eq)
         assert r.total_mortgage <= 820_000.0  # started at 820k
         assert r.total_mortgage >= 0.0
@@ -199,7 +204,7 @@ class TestDeterministic:
         bridge_end = min(e.super_access_age for e in h.earners)
         n_years = bridge_end - inputs.simulation_start_age
         eq = [EQ_MEAN] * n_years
-        spr = [SUPER_MEAN] * n_years
+        [SUPER_MEAN] * n_years
         r = run_single_trial(household=h, inputs=inputs, eq_returns=eq)
         assert r.total_super > 549_101.34  # starting super sum
 
@@ -210,19 +215,17 @@ class TestDeterministic:
         bridge_end = min(e.super_access_age for e in h_sell.earners)
         n_years = bridge_end - inputs.simulation_start_age
         eq = [EQ_MEAN] * n_years
-        spr = [SUPER_MEAN] * n_years
+        [SUPER_MEAN] * n_years
 
         r_sell = run_single_trial(
             household=h_sell,
             inputs=inputs,
             eq_returns=eq,
-            
         )
         r_keep = run_single_trial(
             household=reference_household(sell_uk=False),
             inputs=inputs,
             eq_returns=eq,
-            
         )
         # Selling UK should result in more bridge (CGT paid upfront but
         # proceeds earn returns)
@@ -247,13 +250,13 @@ class TestEdgeCases:
         bridge_end = min(e.super_access_age for e in h.earners)
         n_years = bridge_end - inputs.simulation_start_age
         eq = [EQ_MEAN] * n_years
-        spr = [SUPER_MEAN] * n_years
+        [SUPER_MEAN] * n_years
         r = run_single_trial(household=h, inputs=inputs, eq_returns=eq)
         assert r.bridge >= 0
         assert r.total_super > 0
 
     def test_single_income_couple(self) -> None:
-        """2 earners, one non-working (is_employed=False)."""
+        """2 earners, one non-working."""
         h = Household(
             earners=(
                 Earner(label="Worker", salary=150_000.0, super_balance=80_000.0),
@@ -261,7 +264,7 @@ class TestEdgeCases:
                     label="Non-worker",
                     salary=0.0,
                     super_balance=40_000.0,
-                    is_employed=False,
+                    employment_type="not_employed",
                 ),
             ),
         )
@@ -269,7 +272,7 @@ class TestEdgeCases:
         bridge_end = min(e.super_access_age for e in h.earners)
         n_years = bridge_end - inputs.simulation_start_age
         eq = [EQ_MEAN] * n_years
-        spr = [SUPER_MEAN] * n_years
+        [SUPER_MEAN] * n_years
         r = run_single_trial(household=h, inputs=inputs, eq_returns=eq)
         assert r.total_super > 120_000.0  # initial sum
         assert r.bridge >= 0
@@ -285,7 +288,7 @@ class TestEdgeCases:
         bridge_end = min(e.super_access_age for e in h.earners)
         n_years = bridge_end - inputs.simulation_start_age
         eq = [EQ_MEAN] * n_years
-        spr = [SUPER_MEAN] * n_years
+        [SUPER_MEAN] * n_years
         r = run_single_trial(household=h, inputs=inputs, eq_returns=eq)
         assert r.bridge >= 0
 
@@ -300,7 +303,7 @@ class TestEdgeCases:
         bridge_end = min(e.super_access_age for e in h.earners)
         n_years = bridge_end - inputs.simulation_start_age
         eq = [EQ_MEAN] * n_years
-        spr = [SUPER_MEAN] * n_years
+        [SUPER_MEAN] * n_years
         r = run_single_trial(household=h, inputs=inputs, eq_returns=eq)
         assert r.bridge >= 0
 
@@ -328,7 +331,7 @@ class TestEdgeCases:
         bridge_end = min(e.super_access_age for e in h.earners)
         n_years = bridge_end - inputs.simulation_start_age
         eq = [EQ_MEAN] * n_years
-        spr = [SUPER_MEAN] * n_years
+        [SUPER_MEAN] * n_years
         r = run_single_trial(household=h, inputs=inputs, eq_returns=eq)
         assert r.bridge >= 0
         assert r.total_super > 180_000.0
@@ -361,7 +364,7 @@ class TestEdgeCases:
         inputs = SimulationInputs(simulation_start_age=37)
         n_years = min(e.super_access_age for e in h.earners) - inputs.simulation_start_age
         eq = [EQ_MEAN] * n_years
-        spr = [SUPER_MEAN] * n_years
+        [SUPER_MEAN] * n_years
         r = run_single_trial(household=h, inputs=inputs, eq_returns=eq)
         # With no payment, principal stays flat (negative amortisation prevented)
         assert r.total_mortgage == 500_000.0
@@ -391,13 +394,13 @@ class TestEdgeCases:
         inputs = SimulationInputs(simulation_start_age=37)
         n = min(e.super_access_age for e in h_with.earners) - inputs.simulation_start_age
         eq = [EQ_MEAN] * n
-        spr = [SUPER_MEAN] * n
+        [SUPER_MEAN] * n
         r_with = run_single_trial(h_with, inputs, eq_returns=eq)
         r_without = run_single_trial(h_without, inputs, eq_returns=eq)
         # With mortgage should have less bridge (interest cost drains surplus)
         assert r_with.bridge < r_without.bridge, (
-            f'IO mortgage case (${r_with.bridge:,.0f}) should be less '
-            f'than no-mortgage case (${r_without.bridge:,.0f})'
+            f"IO mortgage case (${r_with.bridge:,.0f}) should be less "
+            f"than no-mortgage case (${r_without.bridge:,.0f})"
         )
         # IO mortgage principal should still be unchanged
         assert r_with.total_mortgage == 500_000.0
@@ -410,7 +413,7 @@ class TestEdgeCases:
         inputs = SimulationInputs()
         n_years = min(e.super_access_age for e in h.earners) - inputs.simulation_start_age
         eq = [EQ_MEAN] * n_years
-        spr = [SUPER_MEAN] * n_years
+        [SUPER_MEAN] * n_years
         r = run_single_trial(household=h, inputs=inputs, eq_returns=eq)
         # Super should have grown from contributions + returns
         assert r.total_super >= 0
@@ -421,17 +424,25 @@ class TestEdgeCases:
             earners=(Earner(salary=200_000.0, super_balance=50_000.0, retirement_age=60),),
             investment_accounts=(
                 InvestmentAccount(
-                    label="Offset", market_value=10_000.0, cost_basis=10_000.0,
-                    is_offset=True, cgt_rate=0.0,
+                    label="Offset",
+                    market_value=10_000.0,
+                    cost_basis=10_000.0,
+                    is_offset=True,
+                    cgt_rate=0.0,
                 ),
                 InvestmentAccount(
-                    label="Shares", market_value=10_000.0, cost_basis=10_000.0,
-                    asset_class="equity", interest_rate=0.0,
+                    label="Shares",
+                    market_value=10_000.0,
+                    cost_basis=10_000.0,
+                    asset_class="equity",
+                    interest_rate=0.0,
                 ),
             ),
             mortgages=(
                 MortgageAccount(
-                    principal=500_000.0, interest_rate=0.06, monthly_payment=3_000.0,
+                    principal=500_000.0,
+                    interest_rate=0.06,
+                    monthly_payment=3_000.0,
                     offset_accounts=("Offset",),
                 ),
             ),
@@ -443,7 +454,7 @@ class TestEdgeCases:
         )
         n_years = min(e.super_access_age for e in h.earners) - inputs.simulation_start_age
         eq = [0.07] * n_years
-        spr = [0.07] * n_years
+        [0.07] * n_years
         r = run_single_trial(h, inputs, eq_returns=eq)
         # Bridge should be positive
         assert r.bridge > 0
@@ -454,17 +465,25 @@ class TestEdgeCases:
             earners=(Earner(salary=200_000.0, super_balance=50_000.0, retirement_age=60),),
             investment_accounts=(
                 InvestmentAccount(
-                    label="Offset", market_value=10_000.0, cost_basis=10_000.0,
-                    is_offset=True, cgt_rate=0.0,
+                    label="Offset",
+                    market_value=10_000.0,
+                    cost_basis=10_000.0,
+                    is_offset=True,
+                    cgt_rate=0.0,
                 ),
                 InvestmentAccount(
-                    label="Shares", market_value=10_000.0, cost_basis=10_000.0,
-                    asset_class="equity", interest_rate=0.0,
+                    label="Shares",
+                    market_value=10_000.0,
+                    cost_basis=10_000.0,
+                    asset_class="equity",
+                    interest_rate=0.0,
                 ),
             ),
             mortgages=(
                 MortgageAccount(
-                    principal=500_000.0, interest_rate=0.06, monthly_payment=3_000.0,
+                    principal=500_000.0,
+                    interest_rate=0.06,
+                    monthly_payment=3_000.0,
                     offset_accounts=("Offset",),
                 ),
             ),
@@ -476,7 +495,7 @@ class TestEdgeCases:
         )
         n_years = min(e.super_access_age for e in h.earners) - inputs.simulation_start_age
         eq = [0.07] * n_years
-        spr = [0.07] * n_years
+        [0.07] * n_years
         r = run_single_trial(h, inputs, eq_returns=eq)
         # Bridge should still be positive
         assert r.bridge > 0
@@ -574,7 +593,7 @@ class TestReferenceRegression:
         bridge_end = min(e.super_access_age for e in h.earners)
         n_years = bridge_end - inputs.simulation_start_age
         eq = [EQ_MEAN] * n_years
-        spr = [SUPER_MEAN] * n_years
+        [SUPER_MEAN] * n_years
         r = run_single_trial(household=h, inputs=inputs, eq_returns=eq)
 
         original_bridge = 12_415_095.37
@@ -610,15 +629,22 @@ class TestIOInterestTiming:
         verifies the interest reflects the post-drawdown lower offset.
         """
         import random
+
         random.seed(42)
         offset = InvestmentAccount(
-            label='Offset 1', market_value=100_000, cost_basis=100_000,
-            asset_class='cash', is_offset=True, cgt_rate=0.0,
+            label="Offset 1",
+            market_value=100_000,
+            cost_basis=100_000,
+            asset_class="cash",
+            is_offset=True,
+            cgt_rate=0.0,
         )
         m = MortgageAccount(
-            label='IO Loan', principal=500_000, interest_rate=0.06,
+            label="IO Loan",
+            principal=500_000,
+            interest_rate=0.06,
             monthly_payment=0.0,  # interest-only
-            offset_accounts=('Offset 1',),
+            offset_accounts=("Offset 1",),
         )
         # Low income forces offset drawdown for living expenses
         e = Earner(salary=50_000, super_balance=50_000, retirement_age=60)
@@ -642,15 +668,22 @@ class TestIOInterestTiming:
         the period, the pre-drawdown figure understates interest.
         """
         import random
+
         random.seed(42)
         offset = InvestmentAccount(
-            label='Offset 1', market_value=200_000, cost_basis=200_000,
-            asset_class='cash', is_offset=True, cgt_rate=0.0,
+            label="Offset 1",
+            market_value=200_000,
+            cost_basis=200_000,
+            asset_class="cash",
+            is_offset=True,
+            cgt_rate=0.0,
         )
         m = MortgageAccount(
-            label='IO Loan', principal=400_000, interest_rate=0.07,
+            label="IO Loan",
+            principal=400_000,
+            interest_rate=0.07,
             monthly_payment=0.0,
-            offset_accounts=('Offset 1',),
+            offset_accounts=("Offset 1",),
         )
         e = Earner(salary=40_000, super_balance=50_000, retirement_age=60)
         h = Household(
@@ -678,30 +711,42 @@ class TestOffsetReserveFloor:
         for the mortgage to clear in most paths.
         """
         import random
+
         random.seed(42)
         offset = InvestmentAccount(
-            label='Offset 1', market_value=200_000, cost_basis=200_000,
-            asset_class='cash', is_offset=True, cgt_rate=0.0,
+            label="Offset 1",
+            market_value=200_000,
+            cost_basis=200_000,
+            asset_class="cash",
+            is_offset=True,
+            cgt_rate=0.0,
         )
         taxable = InvestmentAccount(
-            label='Taxable', market_value=50_000, cost_basis=50_000,
-            asset_class='equity', cgt_rate=0.30,
+            label="Taxable",
+            market_value=50_000,
+            cost_basis=50_000,
+            asset_class="equity",
+            cgt_rate=0.30,
         )
         # Large mortgage ($650k at 7%), tight budget ($100k income, $58k living):
         # monthly $4,500 P&I payment barely covers interest when offset is drained.
         # With no floor, offset consumed by living; effective debt stays high,
         # amortisation stalls, mortgage does not clear by age 60.
         m_no_floor = MortgageAccount(
-            label='BigLoan', principal=650_000, interest_rate=0.07,
+            label="BigLoan",
+            principal=650_000,
+            interest_rate=0.07,
             monthly_payment=4_500,
-            offset_accounts=('Offset 1',),
+            offset_accounts=("Offset 1",),
             offset_reserve_floor=0.0,
             loan_term_end_age=60,
         )
         m_with_floor = MortgageAccount(
-            label='BigLoan', principal=650_000, interest_rate=0.07,
+            label="BigLoan",
+            principal=650_000,
+            interest_rate=0.07,
             monthly_payment=4_500,
-            offset_accounts=('Offset 1',),
+            offset_accounts=("Offset 1",),
             offset_reserve_floor=100_000.0,
             loan_term_end_age=60,
         )
@@ -717,12 +762,19 @@ class TestOffsetReserveFloor:
             mortgages=(m_with_floor,),
             investment_accounts=(
                 InvestmentAccount(
-                    label='Offset 1', market_value=200_000, cost_basis=200_000,
-                    asset_class='cash', is_offset=True, cgt_rate=0.0,
+                    label="Offset 1",
+                    market_value=200_000,
+                    cost_basis=200_000,
+                    asset_class="cash",
+                    is_offset=True,
+                    cgt_rate=0.0,
                 ),
                 InvestmentAccount(
-                    label='Taxable', market_value=50_000, cost_basis=50_000,
-                    asset_class='equity', cgt_rate=0.30,
+                    label="Taxable",
+                    market_value=50_000,
+                    cost_basis=50_000,
+                    asset_class="equity",
+                    cgt_rate=0.30,
                 ),
             ),
             base_living_expenses=58_000,
@@ -731,7 +783,9 @@ class TestOffsetReserveFloor:
         res_no_floor = run_monte_carlo(h_no_floor, inputs)
         res_with_floor = run_monte_carlo(h_with_floor, inputs)
         # Floor case must have materially better clearance than no-floor
-        assert res_with_floor.mortgage_term_clearance_rate > res_no_floor.mortgage_term_clearance_rate, (
+        assert (
+            res_with_floor.mortgage_term_clearance_rate > res_no_floor.mortgage_term_clearance_rate
+        ), (
             f"Floor ({res_with_floor.mortgage_term_clearance_rate:.1%}) should be > "
             f"no-floor ({res_no_floor.mortgage_term_clearance_rate:.1%})"
         )
@@ -749,11 +803,14 @@ class TestMortgageStallCheck:
         flag this as a failure.
         """
         import random
+
         random.seed(42)
         # $600k at 7% = $42k/yr interest = $3,500/month. Monthly payment is
         # exactly $3,500, so NO principal is ever repaid (all goes to interest).
         m = MortgageAccount(
-            label='Staller', principal=600_000, interest_rate=0.07,
+            label="Staller",
+            principal=600_000,
+            interest_rate=0.07,
             monthly_payment=3_500,  # interest-only effective
             loan_term_end_age=60,  # must clear by 60
         )
@@ -761,8 +818,12 @@ class TestMortgageStallCheck:
         # payment ($3,500/mo = $42k/yr) exactly covers interest on $600k at
         # 7%, so NO principal is ever repaid.
         cash_account = InvestmentAccount(
-            label='Cash', market_value=300_000, cost_basis=300_000,
-            asset_class='cash', is_offset=False, cgt_rate=0.0,
+            label="Cash",
+            market_value=300_000,
+            cost_basis=300_000,
+            asset_class="cash",
+            is_offset=False,
+            cgt_rate=0.0,
         )
         e = Earner(salary=120_000, super_balance=50_000, retirement_age=60)
         h = Household(
@@ -774,9 +835,7 @@ class TestMortgageStallCheck:
         inputs = SimulationInputs(simulation_start_age=37, n_iterations=200)
         res = run_monte_carlo(h, inputs)
         # Bridge survival should be high (low expenses relative to income)
-        assert res.p_success > 0.5, (
-            f"Bridge survival ({res.p_success:.1%}) should be high"
-        )
+        assert res.p_success > 0.5, f"Bridge survival ({res.p_success:.1%}) should be high"
         # Term-clearance should be 0% — principal never decreases
         assert res.mortgage_term_clearance_rate == 0.0, (
             f"Term clearance ({res.mortgage_term_clearance_rate:.1%}) "
@@ -800,31 +859,49 @@ class TestOffsetReserveModes:
         debt at $600k where interest = payment = $3,500/mo (no growth).
         """
         import random
+
         random.seed(42)
         m_no_floor = MortgageAccount(
-            label='L', principal=650_000, interest_rate=0.07,
-            monthly_payment=3_500, loan_term_end_age=60,
-            offset_accounts=('O1',),
-            offset_reserve_mode='fixed', offset_reserve_floor=0.0,
+            label="L",
+            principal=650_000,
+            interest_rate=0.07,
+            monthly_payment=3_500,
+            loan_term_end_age=60,
+            offset_accounts=("O1",),
+            offset_reserve_mode="fixed",
+            offset_reserve_floor=0.0,
         )
         m_stall = MortgageAccount(
-            label='L', principal=650_000, interest_rate=0.07,
-            monthly_payment=3_500, loan_term_end_age=60,
-            offset_accounts=('O1',),
-            offset_reserve_mode='stall_prevention', offset_reserve_floor=0.0,
+            label="L",
+            principal=650_000,
+            interest_rate=0.07,
+            monthly_payment=3_500,
+            loan_term_end_age=60,
+            offset_accounts=("O1",),
+            offset_reserve_mode="stall_prevention",
+            offset_reserve_floor=0.0,
         )
         inputs = SimulationInputs(simulation_start_age=37, n_iterations=200)
         offset = InvestmentAccount(
-            label='O1', market_value=60_000, cost_basis=60_000,
-            asset_class='cash', is_offset=True, cgt_rate=0.0,
+            label="O1",
+            market_value=60_000,
+            cost_basis=60_000,
+            asset_class="cash",
+            is_offset=True,
+            cgt_rate=0.0,
         )
         taxable = InvestmentAccount(
-            label='T', market_value=40_000, cost_basis=40_000,
-            asset_class='cash', is_offset=False, cgt_rate=0.0,
+            label="T",
+            market_value=40_000,
+            cost_basis=40_000,
+            asset_class="cash",
+            is_offset=False,
+            cgt_rate=0.0,
         )
         e = Earner(salary=130_000, super_balance=50_000, retirement_age=60)
         h_no = Household(
-            earners=(e,), mortgages=(m_no_floor,),
+            earners=(e,),
+            mortgages=(m_no_floor,),
             investment_accounts=(offset, taxable),
             base_living_expenses=70_000,
         )
@@ -833,26 +910,32 @@ class TestOffsetReserveModes:
             mortgages=(m_stall,),
             investment_accounts=(
                 InvestmentAccount(
-                    label='O1', market_value=60_000, cost_basis=60_000,
-                    asset_class='cash', is_offset=True, cgt_rate=0.0,
+                    label="O1",
+                    market_value=60_000,
+                    cost_basis=60_000,
+                    asset_class="cash",
+                    is_offset=True,
+                    cgt_rate=0.0,
                 ),
                 InvestmentAccount(
-                    label='T', market_value=40_000, cost_basis=40_000,
-                    asset_class='cash', is_offset=False, cgt_rate=0.0,
+                    label="T",
+                    market_value=40_000,
+                    cost_basis=40_000,
+                    asset_class="cash",
+                    is_offset=False,
+                    cgt_rate=0.0,
                 ),
             ),
             base_living_expenses=70_000,
         )
         res_no = run_monte_carlo(h_no, inputs)
         res_stall = run_monte_carlo(h_stall, inputs)
-        rem_no = res_no.remaining_mortgage_p50.get('L', 0)
-        rem_stall = res_stall.remaining_mortgage_p50.get('L', 0)
+        rem_no = res_no.remaining_mortgage_p50.get("L", 0)
+        rem_stall = res_stall.remaining_mortgage_p50.get("L", 0)
         assert rem_stall < rem_no, (
-            f"Stall-prevention remaining (\${rem_stall:,.0f}) should be < "
-            f"no-floor (\${rem_no:,.0f})"
+            f"Stall-prevention remaining (${rem_stall:,.0f}) should be < "
+            f"no-floor (${rem_no:,.0f})"
         )
-
-
 
     def test_interest_cancelling_preserves_more_than_stall(self) -> None:
         """Interest-cancelling preserves more offset than stall-prevention.
@@ -868,31 +951,49 @@ class TestOffsetReserveModes:
         → reduces effective debt → lower remaining mortgage.
         """
         import random
+
         random.seed(42)
         m_stall = MortgageAccount(
-            label='L', principal=500_000, interest_rate=0.07,
-            monthly_payment=3_500, loan_term_end_age=60,
-            offset_accounts=('O1',),
-            offset_reserve_mode='stall_prevention', offset_reserve_floor=0.0,
+            label="L",
+            principal=500_000,
+            interest_rate=0.07,
+            monthly_payment=3_500,
+            loan_term_end_age=60,
+            offset_accounts=("O1",),
+            offset_reserve_mode="stall_prevention",
+            offset_reserve_floor=0.0,
         )
         m_cancel = MortgageAccount(
-            label='L', principal=500_000, interest_rate=0.07,
-            monthly_payment=3_500, loan_term_end_age=60,
-            offset_accounts=('O1',),
-            offset_reserve_mode='interest_cancelling', offset_reserve_floor=0.0,
+            label="L",
+            principal=500_000,
+            interest_rate=0.07,
+            monthly_payment=3_500,
+            loan_term_end_age=60,
+            offset_accounts=("O1",),
+            offset_reserve_mode="interest_cancelling",
+            offset_reserve_floor=0.0,
         )
         inputs = SimulationInputs(simulation_start_age=37, n_iterations=200)
         offset = InvestmentAccount(
-            label='O1', market_value=200_000, cost_basis=200_000,
-            asset_class='cash', is_offset=True, cgt_rate=0.0,
+            label="O1",
+            market_value=200_000,
+            cost_basis=200_000,
+            asset_class="cash",
+            is_offset=True,
+            cgt_rate=0.0,
         )
         taxable = InvestmentAccount(
-            label='T', market_value=200_000, cost_basis=200_000,
-            asset_class='cash', is_offset=False, cgt_rate=0.0,
+            label="T",
+            market_value=200_000,
+            cost_basis=200_000,
+            asset_class="cash",
+            is_offset=False,
+            cgt_rate=0.0,
         )
         e = Earner(salary=90_000, super_balance=50_000, retirement_age=60)
         h_stall = Household(
-            earners=(e,), mortgages=(m_stall,),
+            earners=(e,),
+            mortgages=(m_stall,),
             investment_accounts=(offset, taxable),
             base_living_expenses=90_000,
         )
@@ -900,19 +1001,33 @@ class TestOffsetReserveModes:
             earners=(Earner(salary=90_000, super_balance=50_000, retirement_age=60),),
             mortgages=(m_cancel,),
             investment_accounts=(
-                InvestmentAccount(label='O1', market_value=200_000, cost_basis=200_000, asset_class='cash', is_offset=True, cgt_rate=0.0),
-                InvestmentAccount(label='T', market_value=200_000, cost_basis=200_000, asset_class='cash', is_offset=False, cgt_rate=0.0),
+                InvestmentAccount(
+                    label="O1",
+                    market_value=200_000,
+                    cost_basis=200_000,
+                    asset_class="cash",
+                    is_offset=True,
+                    cgt_rate=0.0,
+                ),
+                InvestmentAccount(
+                    label="T",
+                    market_value=200_000,
+                    cost_basis=200_000,
+                    asset_class="cash",
+                    is_offset=False,
+                    cgt_rate=0.0,
+                ),
             ),
             base_living_expenses=90_000,
         )
         res_stall = run_monte_carlo(h_stall, inputs)
         res_cancel = run_monte_carlo(h_cancel, inputs)
-        rem_stall = res_stall.remaining_mortgage_p50.get('L', 0)
-        rem_cancel = res_cancel.remaining_mortgage_p50.get('L', 0)
+        rem_stall = res_stall.remaining_mortgage_p50.get("L", 0)
+        rem_cancel = res_cancel.remaining_mortgage_p50.get("L", 0)
         # Interest-cancelling preserves ALL offset → lower remaining mortgage
         assert rem_cancel < rem_stall, (
-            f"Interest-cancelling remaining (\${rem_cancel:,.0f}) should be < "
-            f"stall-prevention (\${rem_stall:,.0f})"
+            f"Interest-cancelling remaining (${rem_cancel:,.0f}) should be < "
+            f"stall-prevention (${rem_stall:,.0f})"
         )
 
     def test_interest_cancelling_no_offset_available_for_other_expenses(
@@ -923,23 +1038,33 @@ class TestOffsetReserveModes:
         bridge survival compared to a no-floor strategy.
         """
         import random
+
         random.seed(42)
         m = MortgageAccount(
-            label='L', principal=400_000, interest_rate=0.065,
-            monthly_payment=3_500, loan_term_end_age=60,
-            offset_accounts=('O1',),
-            offset_reserve_mode='interest_cancelling', offset_reserve_floor=0.0,
+            label="L",
+            principal=400_000,
+            interest_rate=0.065,
+            monthly_payment=3_500,
+            loan_term_end_age=60,
+            offset_accounts=("O1",),
+            offset_reserve_mode="interest_cancelling",
+            offset_reserve_floor=0.0,
         )
         inputs = SimulationInputs(simulation_start_age=37, n_iterations=200)
         offset = InvestmentAccount(
-            label='O1', market_value=450_000, cost_basis=450_000,
-            asset_class='cash', is_offset=True, cgt_rate=0.0,
+            label="O1",
+            market_value=450_000,
+            cost_basis=450_000,
+            asset_class="cash",
+            is_offset=True,
+            cgt_rate=0.0,
         )
         # No other accounts — so no money available for expenses if offset
         # is fully reserved for the mortgage
         e = Earner(salary=100_000, super_balance=50_000, retirement_age=60)
         h = Household(
-            earners=(e,), mortgages=(m,),
+            earners=(e,),
+            mortgages=(m,),
             investment_accounts=(offset,),
             base_living_expenses=110_000,
         )
@@ -961,15 +1086,24 @@ class TestStaggeredRetirementExpenseBlend:
         E1 retires at 50, E2 at 55.  At age 52: 1/2 retired, blend=0.5*60k+0.5*80k=$70k.
         """
         import random
+
         random.seed(42)
-        e1 = Earner(label="E1", salary=150_000, super_balance=100_000,
-                    retirement_age=50, super_access_age=60)
-        e2 = Earner(label="E2", salary=120_000, super_balance=100_000,
-                    retirement_age=55, super_access_age=60)
-        h = Household(earners=(e1, e2),
-                      base_living_expenses=80_000, retirement_target=60_000)
-        inputs = SimulationInputs(simulation_start_age=37, n_iterations=50,
-                                  inflation=0.025)
+        e1 = Earner(
+            label="E1",
+            salary=150_000,
+            super_balance=100_000,
+            retirement_age=50,
+            super_access_age=60,
+        )
+        e2 = Earner(
+            label="E2",
+            salary=120_000,
+            super_balance=100_000,
+            retirement_age=55,
+            super_access_age=60,
+        )
+        h = Household(earners=(e1, e2), base_living_expenses=80_000, retirement_target=60_000)
+        inputs = SimulationInputs(simulation_start_age=37, n_iterations=50, inflation=0.025)
         res = run_monte_carlo(h, inputs)
         assert isinstance(res.p_success, float)
         assert 0.0 <= res.p_success <= 1.0
@@ -977,13 +1111,17 @@ class TestStaggeredRetirementExpenseBlend:
     def test_single_earner_no_change(self) -> None:
         """Single-earner: blend reduces to binary 0 or 1, same as old behaviour."""
         import random
+
         random.seed(42)
-        e = Earner(label="E1", salary=150_000, super_balance=200_000,
-                   retirement_age=50, super_access_age=60)
-        h = Household(earners=(e,),
-                      base_living_expenses=80_000, retirement_target=60_000)
-        inputs = SimulationInputs(simulation_start_age=37, n_iterations=50,
-                                  inflation=0.025)
+        e = Earner(
+            label="E1",
+            salary=150_000,
+            super_balance=200_000,
+            retirement_age=50,
+            super_access_age=60,
+        )
+        h = Household(earners=(e,), base_living_expenses=80_000, retirement_target=60_000)
+        inputs = SimulationInputs(simulation_start_age=37, n_iterations=50, inflation=0.025)
         res = run_monte_carlo(h, inputs)
         assert isinstance(res.p_success, float)
         assert 0.0 <= res.p_success <= 1.0
@@ -999,23 +1137,33 @@ class TestSuccessProbabilityDisplay:
 
     def test_success_probability_appears_once(self) -> None:
         """display_results() outputs success probability exactly once."""
-        from models import SimulationResults
-        from ui import console as ui_console, display_results
         from io import StringIO
+
+        from models import SimulationResults
+        from ui import console as ui_console
+        from ui import display_results
 
         buf = StringIO()
         old_file = ui_console.file
         ui_console.file = buf
         try:
             res = SimulationResults(
-                trials=1000, p_success=0.873,
-                bridge_mean=200_000.0, bridge_median=180_000.0,
-                bridge_p5=50_000.0, bridge_p10=80_000.0,
-                bridge_p25=120_000.0, bridge_p75=250_000.0,
-                bridge_p90=300_000.0, bridge_p95=350_000.0,
-                bridge_min=10_000.0, bridge_floor=5_000.0,
-                floor_age=55, floor_end_bridge=100_000.0,
-                super_median=500_000.0, horizon_age=60,
+                trials=1000,
+                p_success=0.873,
+                bridge_mean=200_000.0,
+                bridge_median=180_000.0,
+                bridge_p5=50_000.0,
+                bridge_p10=80_000.0,
+                bridge_p25=120_000.0,
+                bridge_p75=250_000.0,
+                bridge_p90=300_000.0,
+                bridge_p95=350_000.0,
+                bridge_min=10_000.0,
+                bridge_floor=5_000.0,
+                floor_age=55,
+                floor_end_bridge=100_000.0,
+                super_median=500_000.0,
+                horizon_age=60,
             )
             display_results(res)
         finally:
@@ -1026,10 +1174,11 @@ class TestSuccessProbabilityDisplay:
         # also contains "Success probability" at the start of a sentence)
         # The chart line has the format: "Success probability: X%  (95%..."
         import re
+
         chart_lines = re.findall(r"Success probability: \d+\.\d+%", output)
-        assert len(chart_lines) == 1, (
-            f"Expected 1 chart line, got {len(chart_lines)}: {chart_lines}"
-        )
+        assert (
+            len(chart_lines) == 1
+        ), f"Expected 1 chart line, got {len(chart_lines)}: {chart_lines}"
 
 
 # =============================================================================
@@ -1045,25 +1194,32 @@ class TestRealSalaryGrowth:
         Salary grows at inflation rate, flat in real terms.
         """
         import random
+
         random.seed(42)
-        e = Earner(label="E1", salary=100_000, super_balance=50_000,
-                    salary_growth_rate=0.0, retirement_age=50, super_access_age=60)
+        e = Earner(
+            label="E1",
+            salary=100_000,
+            super_balance=50_000,
+            salary_growth_rate=0.0,
+            retirement_age=50,
+            super_access_age=60,
+        )
         h = Household(earners=(e,), base_living_expenses=80_000)
-        inputs = SimulationInputs(simulation_start_age=37, n_iterations=10,
-                                  inflation=0.025)
+        inputs = SimulationInputs(simulation_start_age=37, n_iterations=10, inflation=0.025)
         res = run_monte_carlo(h, inputs)
         assert isinstance(res.p_success, float)
 
     def test_real_growth_compounds_correctly(self) -> None:
         """Assert the inflation compounding step is present in source."""
         import simulation as sim_mod
+
         source_file = sim_mod.__file__
         assert source_file is not None
         with open(source_file) as f:
             content = f.read()
-        assert "(1 + earner.salary_growth_rate) * (1 + inputs.inflation)" in content, (
-            "Salary growth must compound real_rate with inflation."
-        )
+        assert (
+            "(1 + earner.salary_growth_rate) * (1 + inputs.inflation)" in content
+        ), "Salary growth must compound real_rate with inflation."
 
 
 # =============================================================================
@@ -1077,59 +1233,77 @@ class TestEmploymentType:
     def test_self_employed_runs(self) -> None:
         """Self-employed earner simulates without errors."""
         import random
+
         random.seed(42)
-        e = Earner(label="SE", salary=120_000, super_balance=50_000,
-                    salary_growth_rate=0.005, retirement_age=55, super_access_age=60,
-                    employment_type="self_employed", sg_rate=0.12)
+        e = Earner(
+            label="SE",
+            salary=120_000,
+            super_balance=50_000,
+            salary_growth_rate=0.005,
+            retirement_age=55,
+            super_access_age=60,
+            employment_type="self_employed",
+            sg_rate=0.12,
+        )
         h = Household(earners=(e,), base_living_expenses=80_000)
-        inputs = SimulationInputs(simulation_start_age=37, n_iterations=10,
-                                  inflation=0.025)
+        inputs = SimulationInputs(simulation_start_age=37, n_iterations=10, inflation=0.025)
         res = run_monte_carlo(h, inputs)
         assert isinstance(res.p_success, float)
 
     def test_employed_normal(self) -> None:
         """Employed earner simulates with normal SG."""
         import random
+
         random.seed(42)
-        e = Earner(label="EM", salary=120_000, super_balance=50_000,
-                    salary_growth_rate=0.005, retirement_age=55, super_access_age=60,
-                    employment_type="employed", sg_rate=0.12)
+        e = Earner(
+            label="EM",
+            salary=120_000,
+            super_balance=50_000,
+            salary_growth_rate=0.005,
+            retirement_age=55,
+            super_access_age=60,
+            employment_type="employed",
+            sg_rate=0.12,
+        )
         h = Household(earners=(e,), base_living_expenses=80_000)
-        inputs = SimulationInputs(simulation_start_age=37, n_iterations=10,
-                                  inflation=0.025)
+        inputs = SimulationInputs(simulation_start_age=37, n_iterations=10, inflation=0.025)
         res = run_monte_carlo(h, inputs)
         assert isinstance(res.p_success, float)
 
     def test_not_employed_no_income(self) -> None:
         """Not-employed: no salary income."""
         import random
+
         random.seed(42)
-        e = Earner(label="NE", salary=120_000, super_balance=50_000,
-                    employment_type="not_employed")
+        e = Earner(label="NE", salary=120_000, super_balance=50_000, employment_type="not_employed")
         h = Household(earners=(e,), base_living_expenses=80_000)
-        inputs = SimulationInputs(simulation_start_age=37, n_iterations=10,
-                                  inflation=0.025)
+        inputs = SimulationInputs(simulation_start_age=37, n_iterations=10, inflation=0.025)
         res = run_monte_carlo(h, inputs)
         assert isinstance(res.p_success, float)
 
     def test_legacy_is_employed_backward_compat(self) -> None:
         """Legacy is_employed=True/False (no employment_type) maps correctly."""
         from models import _deserialise_earner
+
         # is_employed=True -> employment_type="employed"
-        old_true = {"label": "E1", "salary": 120_000, "super_balance": 50_000,
-                     "salary_growth_rate": 0.005, "retirement_age": 55,
-                     "super_access_age": 60, "sg_rate": 0.12,
-                     "is_employed": True}
+        old_true = {
+            "label": "E1",
+            "salary": 120_000,
+            "super_balance": 50_000,
+            "salary_growth_rate": 0.005,
+            "retirement_age": 55,
+            "super_access_age": 60,
+            "sg_rate": 0.12,
+            "is_employed": True,
+        }
         e_t = _deserialise_earner(old_true)
         assert e_t.employment_type == "employed"
-        assert e_t.is_employed is True
 
         # is_employed=False -> employment_type="not_employed"
         old_false = dict(old_true)
         old_false["is_employed"] = False
         e_f = _deserialise_earner(old_false)
         assert e_f.employment_type == "not_employed"
-        assert e_f.is_employed is False
 
         # With employment_type key, use it directly
         new_data = dict(old_true)
@@ -1139,9 +1313,9 @@ class TestEmploymentType:
 
         # Run the loaded earners through simulation
         import random
+
         random.seed(42)
-        inputs = SimulationInputs(simulation_start_age=37, n_iterations=10,
-                                  inflation=0.025)
+        inputs = SimulationInputs(simulation_start_age=37, n_iterations=10, inflation=0.025)
         h_loaded = Household(earners=(e_t,), base_living_expenses=80_000)
         res = run_monte_carlo(h_loaded, inputs)
         assert isinstance(res.p_success, float)
@@ -1160,17 +1334,28 @@ class TestCgtCostBaseIndexation:
         correctly with CGT indexation. The indexed-basis computation
         produces a valid result (details tested in test_primitives.py)."""
         import random
+
         random.seed(42)
         acct = InvestmentAccount(
-            label="AU ETFs", market_value=200_000, cost_basis=100_000,
-            asset_class="equity", is_offset=False, cgt_rate=0.30,
+            label="AU ETFs",
+            market_value=200_000,
+            cost_basis=100_000,
+            asset_class="equity",
+            is_offset=False,
+            cgt_rate=0.30,
         )
-        e = Earner(label="E1", salary=150_000, super_balance=100_000,
-                    salary_growth_rate=0.005, retirement_age=50, super_access_age=60)
-        h = Household(earners=(e,), investment_accounts=(acct,),
-                      base_living_expenses=80_000)
-        inputs = SimulationInputs(simulation_start_age=37, n_iterations=50,
-                                  inflation=0.025, cgt_on_drawdowns=True)
+        e = Earner(
+            label="E1",
+            salary=150_000,
+            super_balance=100_000,
+            salary_growth_rate=0.005,
+            retirement_age=50,
+            super_access_age=60,
+        )
+        h = Household(earners=(e,), investment_accounts=(acct,), base_living_expenses=80_000)
+        inputs = SimulationInputs(
+            simulation_start_age=37, n_iterations=50, inflation=0.025, cgt_on_drawdowns=True
+        )
         res = run_monte_carlo(h, inputs)
         assert isinstance(res.p_success, float)
 
@@ -1184,77 +1369,228 @@ class TestSequencingRiskSortDirection:
     """Regression: verify sequencing analysis sorts in the correct direction."""
 
     def test_sort_direction_is_monotonic(self) -> None:
-        """The zip-sort-unzip logic used by worst-first must produce
-        ascending equity returns (smallest first, largest last).
-
-        This is a pure-logic test that mirrors the exact sort inside
-        ``_run_with_order`` — no full Monte Carlo needed.
-        """
+        """The drawdown-period zip-sort-unzip for worst-first must produce
+        ascending equity returns (smallest first, largest last) in the
+        drawdown portion only, leaving working years in original order."""
         import random
+
         random.seed(42)
 
-        # Generate a mock return series the same way _run_with_order does
         n_years = 15
-        from primitives import generate_correlated_returns, SUPER_EQ_CORR
+        drawdown_start = 5  # first 5 years are working, last 10 are drawdown
+        from primitives import SUPER_EQ_CORR, generate_correlated_returns
+
         eq_returns: list[float] = []
         eq_zs: list[float] = []
 
         for _ in range(n_years):
-            eq_r, _super_r, eq_z = generate_correlated_returns(
-                rho=SUPER_EQ_CORR, return_z=True
-            )
+            eq_r, _super_r, eq_z = generate_correlated_returns(rho=SUPER_EQ_CORR, return_z=True)
             eq_returns.append(eq_r)
             eq_zs.append(eq_z)
 
-        # Simulate worst_first sort: ascending (reverse=False)
+        # Simulate worst_first: working unsorted, drawdown sorted ascending
         zipped = list(zip(eq_returns, eq_zs))
-        zipped.sort(key=lambda x: x[0])  # ascending = worst returns first
+        working = zipped[:drawdown_start]
+        drawdown = list(zipped[drawdown_start:])
+        drawdown.sort(key=lambda x: x[0])  # ascending = worst returns first
+        zipped = working + drawdown
         re_eq, re_z = zip(*zipped)
         re_eq_list = list(re_eq)
 
-        # Verify monotonic ascending: first year <= last year
-        assert re_eq_list[0] <= re_eq_list[-1], (
-            f"worst_first must be ascending: first={re_eq_list[0]:.4f} "
-            f"should be <= last={re_eq_list[-1]:.4f}"
+        # Working years unchanged (random order, just verify length + contents)
+        assert re_eq_list[:drawdown_start] == eq_returns[:drawdown_start]
+
+        # Drawdown years are ascending
+        drawdown_vals = re_eq_list[drawdown_start:]
+        assert drawdown_vals[0] <= drawdown_vals[-1], (
+            f"worst_first drawdown must be ascending: first={drawdown_vals[0]:.4f} "
+            f"should be <= last={drawdown_vals[-1]:.4f}"
         )
-        # Stronger: each pair must be non-decreasing
-        for i in range(len(re_eq_list) - 1):
-            assert re_eq_list[i] <= re_eq_list[i + 1], (
-                f"worst_first not monotonic at index {i}: "
-                f"{re_eq_list[i]:.4f} > {re_eq_list[i + 1]:.4f}"
+        for i in range(len(drawdown_vals) - 1):
+            assert drawdown_vals[i] <= drawdown_vals[i + 1], (
+                f"worst_first drawdown not monotonic at index {i}: "
+                f"{drawdown_vals[i]:.4f} > {drawdown_vals[i + 1]:.4f}"
             )
 
     def test_best_first_sort_is_descending(self) -> None:
-        """The best-first sort must produce descending equity returns
-        (largest first, smallest last)."""
+        """The drawdown-period sort for best-first must produce descending
+        equity returns in the drawdown portion only."""
         import random
+
         random.seed(42)
 
         n_years = 15
-        from primitives import generate_correlated_returns, SUPER_EQ_CORR
+        drawdown_start = 5
+        from primitives import SUPER_EQ_CORR, generate_correlated_returns
+
         eq_returns: list[float] = []
         eq_zs: list[float] = []
 
         for _ in range(n_years):
-            eq_r, _super_r, eq_z = generate_correlated_returns(
-                rho=SUPER_EQ_CORR, return_z=True
-            )
+            eq_r, _super_r, eq_z = generate_correlated_returns(rho=SUPER_EQ_CORR, return_z=True)
             eq_returns.append(eq_r)
             eq_zs.append(eq_z)
 
-        # Simulate best_first sort: descending (reverse=True)
+        # Simulate best_first: working unsorted, drawdown sorted descending
         zipped = list(zip(eq_returns, eq_zs))
-        zipped.sort(key=lambda x: x[0], reverse=True)  # descending = best returns first
+        working = zipped[:drawdown_start]
+        drawdown = list(zipped[drawdown_start:])
+        drawdown.sort(key=lambda x: x[0], reverse=True)  # descending = best first
+        zipped = working + drawdown
         re_eq, re_z = zip(*zipped)
         re_eq_list = list(re_eq)
 
-        # Verify monotonic descending: first year >= last year
-        assert re_eq_list[0] >= re_eq_list[-1], (
-            f"best_first must be descending: first={re_eq_list[0]:.4f} "
-            f"should be >= last={re_eq_list[-1]:.4f}"
+        # Working years unchanged
+        assert re_eq_list[:drawdown_start] == eq_returns[:drawdown_start]
+
+        # Drawdown years are descending
+        drawdown_vals = re_eq_list[drawdown_start:]
+        assert drawdown_vals[0] >= drawdown_vals[-1], (
+            f"best_first drawdown must be descending: first={drawdown_vals[0]:.4f} "
+            f"should be >= last={drawdown_vals[-1]:.4f}"
         )
-        for i in range(len(re_eq_list) - 1):
-            assert re_eq_list[i] >= re_eq_list[i + 1], (
-                f"best_first not monotonic at index {i}: "
-                f"{re_eq_list[i]:.4f} < {re_eq_list[i + 1]:.4f}"
+        for i in range(len(drawdown_vals) - 1):
+            assert drawdown_vals[i] >= drawdown_vals[i + 1], (
+                f"best_first drawdown not monotonic at index {i}: "
+                f"{drawdown_vals[i]:.4f} < {drawdown_vals[i + 1]:.4f}"
             )
+
+
+# =============================================================================
+# INTEGRATION TESTS — OPT-IN ANALYSIS  (python-pro Action 5)
+# =============================================================================
+
+
+class TestSequencingAnalysis:
+    """Integration tests for run_sequencing_analysis (Work Item 3)."""
+
+    def test_worst_leq_original_leq_best(self) -> None:
+        """Worst-first p_success <= original <= best-first p_success."""
+        h = reference_household(retire_age=50)
+        inputs = SimulationInputs(n_iterations=200, cgt_on_drawdowns=True)
+
+        base = run_monte_carlo(household=h, inputs=inputs, seed=42)
+        seq = run_sequencing_analysis(
+            household=h,
+            inputs=inputs,
+            original_results=base,
+            seed=42,
+        )
+
+        assert (
+            seq.worst_first_p_success <= seq.original_p_success
+        ), f"worst={seq.worst_first_p_success:.3f} > original={seq.original_p_success:.3f}"
+        assert (
+            seq.original_p_success <= seq.best_first_p_success
+        ), f"original={seq.original_p_success:.3f} > best={seq.best_first_p_success:.3f}"
+
+    def test_worst_first_p5_lowest(self) -> None:
+        """Worst-first p5 should be the lowest among all orderings."""
+        h = reference_household(retire_age=50)
+        inputs = SimulationInputs(n_iterations=200, cgt_on_drawdowns=True)
+
+        base = run_monte_carlo(household=h, inputs=inputs, seed=42)
+        seq = run_sequencing_analysis(
+            household=h,
+            inputs=inputs,
+            original_results=base,
+            seed=42,
+        )
+
+        assert (
+            seq.worst_first_p5 <= seq.original_p5
+        ), f"worst p5={seq.worst_first_p5:,.0f} > original p5={seq.original_p5:,.0f}"
+        # Best-first should have highest p5
+        assert (
+            seq.best_first_p5 >= seq.original_p5
+        ), f"best p5={seq.best_first_p5:,.0f} < original p5={seq.original_p5:,.0f}"
+
+    def test_result_fields_present(self) -> None:
+        """Sequencing result has all six p_success/p5 fields."""
+        h = reference_household(retire_age=50)
+        inputs = SimulationInputs(n_iterations=100, cgt_on_drawdowns=True)
+
+        base = run_monte_carlo(household=h, inputs=inputs, seed=42)
+        seq = run_sequencing_analysis(
+            household=h,
+            inputs=inputs,
+            original_results=base,
+            seed=42,
+        )
+
+        assert isinstance(seq, SequencingRiskResult)
+        assert 0.0 <= seq.worst_first_p_success <= 1.0
+        assert 0.0 <= seq.best_first_p_success <= 1.0
+        assert 0.0 <= seq.original_p_success <= 1.0
+
+
+class TestScenarioComparison:
+    """Integration tests for run_scenario_comparison (Work Item 6)."""
+
+    def test_both_scenarios_returned(self) -> None:
+        """Scenario comparison returns both 'No PT income' and 'Full offset depletion'."""
+        h = reference_household(retire_age=50)
+        inputs = SimulationInputs(n_iterations=100, cgt_on_drawdowns=True)
+
+        scens = run_scenario_comparison(
+            household=h,
+            inputs=inputs,
+            seed=42,
+            n_trials=100,
+        )
+
+        assert "No PT income" in scens
+        assert "Full offset depletion" in scens
+        assert isinstance(scens["No PT income"], ScenarioComparisonResult)
+        assert isinstance(scens["Full offset depletion"], ScenarioComparisonResult)
+
+    def test_no_pt_reduces_success(self) -> None:
+        """Removing PT income should not increase success probability."""
+        h = reference_household(retire_age=50)
+        # Add PT income to at least one earner so the scenario has an effect
+        earners = list(h.earners)
+        earners[0] = type(earners[0])(
+            **{
+                **vars(earners[0]),
+                "pt_days_per_week": 3.0,
+                "pt_start_age": 50,
+                "pt_end_age": 60,
+                "pt_rate_mode": "daily_rate",
+            }
+        )
+        h = type(h)(**{**vars(h), "earners": tuple(earners)})
+
+        inputs = SimulationInputs(n_iterations=200, cgt_on_drawdowns=True)
+        scens = run_scenario_comparison(
+            household=h,
+            inputs=inputs,
+            seed=42,
+            n_trials=200,
+        )
+
+        base = run_monte_carlo(household=h, inputs=inputs, seed=42)
+        assert (
+            scens["No PT income"].p_success <= base.p_success + 0.01
+        ), f"No PT ({scens['No PT income'].p_success:.3f}) > Base ({base.p_success:.3f})"
+
+    def test_results_are_reproducible(self) -> None:
+        """Same seed produces identical scenario comparison results."""
+        h = reference_household(retire_age=50)
+        inputs = SimulationInputs(n_iterations=100, cgt_on_drawdowns=True)
+
+        scens1 = run_scenario_comparison(
+            household=h,
+            inputs=inputs,
+            seed=42,
+            n_trials=100,
+        )
+        scens2 = run_scenario_comparison(
+            household=h,
+            inputs=inputs,
+            seed=42,
+            n_trials=100,
+        )
+
+        for key in ("No PT income", "Full offset depletion"):
+            assert scens1[key].p_success == scens2[key].p_success
+            assert scens1[key].bridge_median == scens2[key].bridge_median

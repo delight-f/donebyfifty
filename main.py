@@ -47,7 +47,7 @@ def _new_simulation() -> None:
 
     # Prompt for start age BEFORE household config so earner super warnings
     # project caps and thresholds from the correct baseline age
-    console.print(f"\n[bold bright_green]--- Simulation Start Age ---[/]")
+    console.print("\n[bold bright_green]--- Simulation Start Age ---[/]")
     start_age = _prompt_int(
         "  Simulation start age",
         37,
@@ -102,6 +102,8 @@ def _load_and_run() -> None:
             f"{profile.last_results.trials} trials"
         )
 
+    start_age = profile.inputs.simulation_start_age
+
     tweak_profile = Prompt.ask(
         "[bright_green]Tweak profile inputs before running?[/] [y/N]",
         default="n",
@@ -109,7 +111,6 @@ def _load_and_run() -> None:
     tweak_profile_yn = tweak_profile.strip().lower() in ("y", "yes", "true")
 
     if tweak_profile_yn:
-        start_age = profile.inputs.simulation_start_age
         household = edit_household(profile.inputs.household, start_age=start_age)
     else:
         household = profile.inputs.household
@@ -121,7 +122,9 @@ def _load_and_run() -> None:
         default="n",
     )
     if tune_sim.strip().lower() in ("y", "yes", "true"):
-        sim_inputs = configure_simulation_params(profile.inputs, household=household, start_age=start_age)
+        sim_inputs = configure_simulation_params(
+            profile.inputs, household=household, start_age=start_age
+        )
     elif tweak_profile_yn:
         # Household tweaked, sim params not — must rebuild with new household
         sim_inputs = dataclasses.replace(profile.inputs, household=household)
@@ -148,33 +151,7 @@ def _run_and_save(
     # Auto-generate a seed if none provided for reproducibility tracking
     if sim_inputs.seed is None:
         seed = _random.randint(0, 2**31 - 1)
-        # Avoid constructing from scratch (risks dropping fields); use replace()
-        # via explicit dataclass rebuild with mutated seed.
-        sim_inputs = SimulationInputs(
-            household=household,
-            n_iterations=sim_inputs.n_iterations,
-            inflation=sim_inputs.inflation,
-            simulation_start_age=sim_inputs.simulation_start_age,
-            simulation_end_age=sim_inputs.simulation_end_age,
-            cgt_on_drawdowns=sim_inputs.cgt_on_drawdowns,
-            sell_strategy=sim_inputs.sell_strategy,
-            sell_order=sim_inputs.sell_order,
-            conc_cap_growth_rate=sim_inputs.conc_cap_growth_rate,
-            sg_max_base_growth_rate=sim_inputs.sg_max_base_growth_rate,
-            seed=seed,
-            super_fee_rate=sim_inputs.super_fee_rate,
-            mls_enabled=sim_inputs.mls_enabled,
-            mls_tiered=sim_inputs.mls_tiered,
-            mls_threshold=sim_inputs.mls_threshold,
-            mls_rate=sim_inputs.mls_rate,
-            bracket_growth_rate=sim_inputs.bracket_growth_rate,
-            div293_threshold=sim_inputs.div293_threshold,
-            div293_rate=sim_inputs.div293_rate,
-            div293_growth_rate=sim_inputs.div293_growth_rate,
-            surplus_investment_pct=sim_inputs.surplus_investment_pct,
-            stochastic_inflation=sim_inputs.stochastic_inflation,
-            success_threshold=sim_inputs.success_threshold,
-        )
+        sim_inputs = dataclasses.replace(sim_inputs, seed=seed)
         console.print(f"[dim]Seed: {seed}[/]")
 
     try:
@@ -183,7 +160,12 @@ def _run_and_save(
         console.print(f"[red]Simulation error: {e}[/]")
         return
 
-    display_results(results, household, start_age=sim_inputs.simulation_start_age, success_threshold=sim_inputs.success_threshold)
+    display_results(
+        results,
+        household,
+        start_age=sim_inputs.simulation_start_age,
+        success_threshold=sim_inputs.success_threshold,
+    )
 
     # ── Results menu (drill-down views) ────────────────────────────
     session = ResultsSession(

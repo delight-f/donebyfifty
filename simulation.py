@@ -17,10 +17,15 @@ from config import (
     BK_RHO,
     BK_SIGMA_MODERATE,
     BK_THETA,
-    CONC_CAP, SG_MAX_BASE, SUPER_TAX_ON_CONTRIBUTIONS as SUPER_TAX_RATE,
+    CONC_CAP,
+    SG_MAX_BASE,
+)
+from config import (
+    SUPER_TAX_ON_CONTRIBUTIONS as SUPER_TAX_RATE,
 )
 from models import Household, SimulationInputs, SimulationResults
 from primitives import (
+    ASSET_CLASS_PARAMS,
     BRACKETS,
     EDU_SCHEDULE_TODAY,
     EQ_MEAN,
@@ -37,7 +42,6 @@ from primitives import (
     sell_assets,
     tax,
 )
-
 
 # =============================================================================
 # INTERNAL STATE
@@ -99,11 +103,6 @@ class _SimulationState:
     def total_bridge(self) -> float:
         """Sum of accessible bridge assets (offset + taxable accounts + cash)."""
         return sum(self.account_values) + self.cash_balance
-
-    @property
-    def total_mortgage(self) -> float:
-        """Sum of all remaining mortgage principals."""
-        return sum(self.mortgage_principals)
 
 
 # =============================================================================
@@ -211,7 +210,10 @@ def simulate_working_year(
             if deterministic:
                 per_super = earner.super_mean_override
             else:
-                mu_s = math.log(1 + earner.super_mean_override) - 0.5 * (earner.super_std_override or 0.12) ** 2
+                mu_s = (
+                    math.log(1 + earner.super_mean_override)
+                    - 0.5 * (earner.super_std_override or 0.12) ** 2
+                )
                 z_s = random.gauss(0, 1)
                 per_super = math.exp(mu_s + (earner.super_std_override or 0.12) * z_s) - 1
         else:
@@ -240,8 +242,6 @@ def simulate_working_year(
     )
 
     total_takehome = 0.0
-    total_sg = 0.0
-    total_sacrifice = 0.0
 
     # Per-earner taxable income accumulator (salary + PT gross - sacrifices)
     earner_taxable = [0.0] * len(household.earners)
@@ -250,7 +250,10 @@ def simulate_working_year(
         if earner.employment_type == "not_employed":
             # Not employed — no salary income, no SG this year
             continue
-        if earner.employment_type in ("employed", "self_employed", "both") and state.age >= earner.retirement_age:
+        if (
+            earner.employment_type in ("employed", "self_employed", "both")
+            and state.age >= earner.retirement_age
+        ):
             # Retired — skip income, even if self-employed or both
             continue
 
@@ -298,6 +301,7 @@ def simulate_working_year(
                 # for dual-income households where neither earner crosses
                 # the individual threshold but combined they do).
                 from primitives import mls_rate_for_income
+
                 mls = mls_rate_for_income(taxable, n_earners=len(household.earners))
             else:
                 mls = inputs.mls_rate if taxable > inputs.mls_threshold else 0.0
@@ -320,8 +324,6 @@ def simulate_working_year(
         earner_taxable[i] = taxable  # salary - sacrifice (or 0.0 if not working)
 
         total_takehome += takehome
-        total_sg += sg
-        total_sacrifice += sacrifice
 
         net_contrib = (sg + sacrifice) * (1 - SUPER_TAX_RATE)
         state.super_balances[i] += net_contrib
@@ -345,7 +347,9 @@ def simulate_working_year(
             if earner.pt_rate_mode == "salary_pct":
                 # PT income as a percentage of the earner's initial full-time salary
                 pt_annual_gross = earner.salary * earner.pt_salary_pct / 100.0
-                weeks = earner.pt_weeks_per_year if earner.pt_weeks_per_year > 0 else PT_WEEKS_PER_YEAR
+                weeks = (
+                    earner.pt_weeks_per_year if earner.pt_weeks_per_year > 0 else PT_WEEKS_PER_YEAR
+                )
                 days = earner.pt_days_per_week if earner.pt_days_per_week > 0 else 1.0
                 eff_daily_rate = pt_annual_gross / (days * weeks)
             else:
@@ -374,10 +378,9 @@ def simulate_working_year(
     # Living expenses
     n_retired = sum(1 for e in household.earners if state.age >= e.retirement_age)
     n_total = len(household.earners)
-    expense_base = (
-        (n_retired / n_total) * household.retirement_target
-        + ((n_total - n_retired) / n_total) * household.base_living_expenses
-    )
+    expense_base = (n_retired / n_total) * household.retirement_target + (
+        (n_total - n_retired) / n_total
+    ) * household.base_living_expenses
     living = expense_base * year_factor
 
     # Education costs for each child
@@ -408,7 +411,9 @@ def simulate_working_year(
 
     # ── 4. Apply surplus/deficit to accounts ────────────────────────────
     offset_idxs = offset_idxs if offset_idxs is not None else _offset_indices(household)
-    non_offset_idxs = non_offset_idxs if non_offset_idxs is not None else _non_offset_indices(household)
+    non_offset_idxs = (
+        non_offset_idxs if non_offset_idxs is not None else _non_offset_indices(household)
+    )
 
     # First pass: handle P&I mortgage payments + living + education
     # IO interest is handled separately in step 4b (after drawdown)
@@ -435,9 +440,15 @@ def simulate_working_year(
 
     elif surplus < 0:
         deficit = -surplus
-        unmet = _drawdown(state, household, deficit, inputs,
-                            offset_idxs=offset_idxs, non_offset_idxs=non_offset_idxs,
-                            cumulative_inflation_factor=year_factor)
+        unmet = _drawdown(
+            state,
+            household,
+            deficit,
+            inputs,
+            offset_idxs=offset_idxs,
+            non_offset_idxs=non_offset_idxs,
+            cumulative_inflation_factor=year_factor,
+        )
         if unmet > 0:
             state.unmet_spending += unmet
         surplus = -unmet  # 0 if covered, negative if still unmet
@@ -467,9 +478,15 @@ def simulate_working_year(
         else:
             remaining_io = io_interest - state.cash_balance
             state.cash_balance = 0.0
-            unmet = _drawdown(state, household, remaining_io, inputs,
-                              offset_idxs=offset_idxs, non_offset_idxs=non_offset_idxs,
-                              cumulative_inflation_factor=year_factor)
+            unmet = _drawdown(
+                state,
+                household,
+                remaining_io,
+                inputs,
+                offset_idxs=offset_idxs,
+                non_offset_idxs=non_offset_idxs,
+                cumulative_inflation_factor=year_factor,
+            )
             if unmet > 0:
                 state.unmet_spending += unmet
 
@@ -526,13 +543,30 @@ def simulate_working_year(
     # ── 7. Grow investment accounts (custom interest rates if specified) ────
     for ai, account in enumerate(household.investment_accounts):
         if not account.is_offset:
-            # Use custom interest rate if specified, otherwise use asset class returns
+            # Custom return override: use user-specified mean but retain
+            # the asset class's standard deviation and equity correlation.
+            # This prevents accidentally disabling Monte Carlo stochasticity
+            # by setting a non-zero interest_rate (Finding F1).
             if account.interest_rate > 0:
-                # Use custom interest rate for this account
-                asset_return = account.interest_rate
+                params = ASSET_CLASS_PARAMS.get(account.asset_class)
+                if params is None:
+                    # Unknown asset class — fall back to fixed rate
+                    asset_return = account.interest_rate
+                elif deterministic:
+                    asset_return = account.interest_rate
+                else:
+                    mu = math.log(1 + account.interest_rate) - 0.5 * params["std"] ** 2
+                    z_independent = random.gauss(0, 1)
+                    z_asset = (
+                        params["corr_with_eq"] * eq_z
+                        + math.sqrt(1 - params["corr_with_eq"] ** 2) * z_independent
+                    )
+                    asset_return = math.exp(mu + params["std"] * z_asset) - 1
             else:
                 # Use asset class returns
-                asset_return = generate_asset_return(account.asset_class, eq_z, eq_return, deterministic=deterministic)
+                asset_return = generate_asset_return(
+                    account.asset_class, eq_z, eq_return, deterministic=deterministic
+                )
             state.account_values[ai] *= 1.0 + asset_return
         # Offset accounts do NOT grow — benefit is via reduced mortgage interest
 
@@ -584,7 +618,9 @@ def _drawdown(
     """
     cgt_on = inputs.cgt_on_drawdowns
     offset_idxs = offset_idxs if offset_idxs is not None else _offset_indices(household)
-    non_offset_idxs = non_offset_idxs if non_offset_idxs is not None else _non_offset_indices(household)
+    non_offset_idxs = (
+        non_offset_idxs if non_offset_idxs is not None else _non_offset_indices(household)
+    )
 
     # Step 1: Draw from offset accounts (tax-free), respecting reserve floors
     for ai in offset_idxs:
@@ -608,8 +644,7 @@ def _drawdown(
                 if monthly_rate > 0:
                     dyn_floor = max(
                         0.0,
-                        state.mortgage_principals[mi]
-                        - (mortgage.monthly_payment / monthly_rate),
+                        state.mortgage_principals[mi] - (mortgage.monthly_payment / monthly_rate),
                     )
                     floor = max(floor, dyn_floor)
             elif mortgage.offset_reserve_mode == "interest_cancelling":
@@ -674,6 +709,7 @@ def _drawdown(
         raw_weighted_rate = account.cgt_rate
         if cgt_on and state.earner_taxable_incomes:
             from primitives import marginal_rate as _marginal_rate
+
             weighted_rate = 0.0
             raw_weighted_rate = 0.0
             for ei, share in account.ownership.items():
@@ -688,7 +724,9 @@ def _drawdown(
 
         old_remain = remain
         remain, tax_paid, tax_without_floor = sell_assets(
-            asset, remain, cgt_on,
+            asset,
+            remain,
+            cgt_on,
             weighted_marginal_rate=weighted_rate,
             raw_marginal_rate=raw_weighted_rate,
             cumulative_inflation_factor=cumulative_inflation_factor,
@@ -758,9 +796,13 @@ class TrialResult:
         self.mortgage_rate_by_age = [list(y) for y in (mortgage_rate_by_age or [])]
         # Per-year drawdown composition (Work Items 4, 5)
         self.offset_drawn_by_age = list(offset_drawn_by_age) if offset_drawn_by_age else []
-        self.non_offset_drawn_by_age = list(non_offset_drawn_by_age) if non_offset_drawn_by_age else []
+        self.non_offset_drawn_by_age = (
+            list(non_offset_drawn_by_age) if non_offset_drawn_by_age else []
+        )
         self.cgt_paid_by_age = list(cgt_paid_by_age) if cgt_paid_by_age else []
-        self.cgt_without_floor_by_age = list(cgt_without_floor_by_age) if cgt_without_floor_by_age else []
+        self.cgt_without_floor_by_age = (
+            list(cgt_without_floor_by_age) if cgt_without_floor_by_age else []
+        )
 
 
 def run_single_trial(
@@ -814,7 +856,7 @@ def run_single_trial(
         state.account_values[target_idx] += windfall
         state.account_bases[target_idx] += windfall
 
-    min_bridge: float = float('inf')
+    min_bridge: float = float("inf")
     floor_age: int = inputs.simulation_start_age
     cumulative_inflation = 1.0
 
@@ -847,14 +889,33 @@ def run_single_trial(
                 # Resolve None -> config default for each BK parameter.
                 # Using "is not None" (not "or") so that 0.0 is a
                 # valid user choice, especially for interest_rate_corr.
-                theta = mortgage.interest_rate_theta if mortgage.interest_rate_theta is not None else BK_THETA
-                kappa = mortgage.interest_rate_kappa if mortgage.interest_rate_kappa is not None else BK_KAPPA
-                sigma_tilde = mortgage.interest_rate_vol if mortgage.interest_rate_vol is not None else BK_SIGMA_MODERATE
-                rho = mortgage.interest_rate_corr if mortgage.interest_rate_corr is not None else BK_RHO
+                theta = (
+                    mortgage.interest_rate_theta
+                    if mortgage.interest_rate_theta is not None
+                    else BK_THETA
+                )
+                kappa = (
+                    mortgage.interest_rate_kappa
+                    if mortgage.interest_rate_kappa is not None
+                    else BK_KAPPA
+                )
+                sigma_tilde = (
+                    mortgage.interest_rate_vol
+                    if mortgage.interest_rate_vol is not None
+                    else BK_SIGMA_MODERATE
+                )
+                rho = (
+                    mortgage.interest_rate_corr
+                    if mortgage.interest_rate_corr is not None
+                    else BK_RHO
+                )
                 state.current_mortgage_rates[mi] = generate_mortgage_rate(
-                    prev_rate=prev, eq_z=eq_z,
-                    theta=theta, kappa=kappa,
-                    sigma_tilde=sigma_tilde, rho=rho,
+                    prev_rate=prev,
+                    eq_z=eq_z,
+                    theta=theta,
+                    kappa=kappa,
+                    sigma_tilde=sigma_tilde,
+                    rho=rho,
                 )
 
         # Reset per-year drawdown counters (Work Items 4, 5)
@@ -870,10 +931,15 @@ def run_single_trial(
             cumulative_inflation = (1 + inputs.inflation) ** y
 
         simulate_working_year(
-            state, household, inputs, eq_r,
-            eq_z=eq_z, deterministic=deterministic_mode,
+            state,
+            household,
+            inputs,
+            eq_r,
+            eq_z=eq_z,
+            deterministic=deterministic_mode,
             cumulative_inflation=cumulative_inflation,
-            offset_idxs=offset_idxs, non_offset_idxs=non_offset_idxs,
+            offset_idxs=offset_idxs,
+            non_offset_idxs=non_offset_idxs,
         )
 
         # Include unmet spending in effective bridge: a household that
@@ -939,9 +1005,7 @@ def run_single_trial(
 # =============================================================================
 
 
-def _bootstrap_se(
-    values: list[float], pct: float, n_bootstrap: int = 200
-) -> float:
+def _bootstrap_se(values: list[float], pct: float, n_bootstrap: int = 200) -> float:
     """Compute bootstrap standard error for a given percentile.
 
     Resamples the observed values with replacement ``n_bootstrap`` times,
@@ -1019,13 +1083,12 @@ def run_monte_carlo(
     super_values: list[float] = []
     per_earner_supers: list[list[float]] = []
     per_mortgage_remaining: list[list[float]] = []
-    per_mortgage_term_cleared: list[list[bool]] = []
+    per_mortgage_term_cleared: list[list[bool | None]] = []
 
     # Track the trial with the worst running-minimum bridge (for diagnostics)
-    global_floor_value: float = float('inf')
+    global_floor_value: float = float("inf")
     global_floor_age: int = inputs.simulation_start_age
     global_floor_end_bridge: float = 0.0
-    global_floor_end_super: float = 0.0
 
     # Failure age collection (Work Item 2)
     failure_ages: list[int] = []
@@ -1061,7 +1124,9 @@ def run_monte_carlo(
         inf_returns: list[float] = []
         for _y in range(n_years):
             if inputs.stochastic_inflation:
-                (eq_r, eq_z), (_super_r, _super_z), inf_r = generate_correlated_triplet(rng=series_rng)
+                (eq_r, eq_z), (_super_r, _super_z), inf_r = generate_correlated_triplet(
+                    rng=series_rng
+                )
                 inf_returns.append(inf_r)
             else:
                 eq_r, _super_r, eq_z = generate_correlated_returns(
@@ -1123,7 +1188,6 @@ def run_monte_carlo(
             global_floor_value = result.min_bridge
             global_floor_age = result.floor_age
             global_floor_end_bridge = result.bridge
-            global_floor_end_super = result.total_super
 
         # Collect failure ages for near-miss analysis (Work Item 2)
         if result.min_bridge <= 0:
@@ -1135,7 +1199,7 @@ def run_monte_carlo(
     deflator = (1 + inputs.inflation) ** n_years
     bridge_values = [v / deflator for v in bridge_values]
     min_bridge_values = [v / deflator for v in min_bridge_values]
-    if global_floor_value < float('inf'):
+    if global_floor_value < float("inf"):
         global_floor_value /= deflator
         global_floor_end_bridge /= deflator
 
@@ -1144,9 +1208,7 @@ def run_monte_carlo(
     super_values.sort()
 
     # ── Compute per-year trajectory percentiles (Work Item 1) ────────
-    bridge_by_age_ages: list[int] = [
-        inputs.simulation_start_age + y for y in range(n_years)
-    ]
+    bridge_by_age_ages: list[int] = [inputs.simulation_start_age + y for y in range(n_years)]
     bridge_by_age_p5: list[float] = []
     bridge_by_age_p10: list[float] = []
     bridge_by_age_p25: list[float] = []
@@ -1161,8 +1223,10 @@ def run_monte_carlo(
         yr_deflator = (1 + inputs.inflation) ** y
         vals = [v / yr_deflator for v in vals]
         ny = len(vals)
+
         def _pct(p: int) -> float:
             return vals[min(int(round(ny * p / 100)), ny - 1)] if ny > 0 else 0.0
+
         bridge_by_age_p5.append(_pct(5))
         bridge_by_age_p10.append(_pct(10))
         bridge_by_age_p25.append(_pct(25))
@@ -1181,13 +1245,17 @@ def run_monte_carlo(
         p50_list: list[float] = []
         p95_list: list[float] = []
         for y in range(n_years):
-            vals = sorted(mortgage_by_age_accum[y][mi]) if mi < len(mortgage_by_age_accum[y]) else []
+            vals = (
+                sorted(mortgage_by_age_accum[y][mi]) if mi < len(mortgage_by_age_accum[y]) else []
+            )
             ny = len(vals)
             p50_list.append(vals[ny // 2] if ny > 0 else 0.0)
             p5_list.append(vals[min(int(round(ny * 0.05)), ny - 1)] if ny > 0 else 0.0)
             p95_list.append(vals[min(int(round(ny * 0.95)), ny - 1)] if ny > 0 else 0.0)
         mortgage_by_age_out[mortgage.label] = {
-            "p50": p50_list, "p5": p5_list, "p95": p95_list,
+            "p50": p50_list,
+            "p5": p5_list,
+            "p95": p95_list,
         }
 
     # ── Compute per-year offset percentiles (Work Item 10) ────────────
@@ -1203,7 +1271,9 @@ def run_monte_carlo(
             p5_list.append(vals[min(int(round(ny * 0.05)), ny - 1)] if ny > 0 else 0.0)
             p95_list.append(vals[min(int(round(ny * 0.95)), ny - 1)] if ny > 0 else 0.0)
         offset_by_age_out[olabel] = {
-            "p50": p50_list, "p5": p5_list, "p95": p95_list,
+            "p50": p50_list,
+            "p5": p5_list,
+            "p95": p95_list,
         }
 
     # ── Compute per-year mortgage rate percentiles (stochastic rates) ──
@@ -1219,7 +1289,9 @@ def run_monte_carlo(
             p5_list.append(vals[min(int(round(ny * 0.05)), ny - 1)] if ny > 0 else 0.0)
             p95_list.append(vals[min(int(round(ny * 0.95)), ny - 1)] if ny > 0 else 0.0)
         mortgage_rate_by_age_out[mortgage.label] = {
-            "p50": p50_list, "p5": p5_list, "p95": p95_list,
+            "p50": p50_list,
+            "p5": p5_list,
+            "p95": p95_list,
         }
 
     # ── Compute per-year drawdown composition percentiles (Items 4, 5) ──
@@ -1308,6 +1380,27 @@ def run_monte_carlo(
     def p(idx: int) -> float:
         return bridge_values[min(idx, n - 1)]
 
+    # ── Low-variance guardrail (Finding F1) ─────────────────────────
+    # Warn if Monte Carlo bridge variance is suspiciously low, which may
+    # indicate a near-deterministic configuration (e.g. fixed return
+    # overrides silencing stochasticity on all investment accounts).
+    import warnings
+
+    bridge_cv = (
+        (p(int(round(n * 0.95))) - p(int(round(n * 0.05)))) / bridge_values[n // 2]
+        if bridge_values[n // 2] > 0
+        else 0.0
+    )
+    if bridge_cv < 0.02 and n >= 100:
+        warnings.warn(
+            f"Monte Carlo bridge variance is extremely low "
+            f"(CV={bridge_cv:.4%}). "
+            f"This may indicate a near-deterministic configuration. "
+            f"Check that investment accounts are using asset class returns "
+            f"(interest_rate=0.0) rather than fixed-rate overrides.",
+            stacklevel=2,
+        )
+
     return SimulationResults(
         trials=n,
         p_success=p_success,
@@ -1373,6 +1466,7 @@ def run_monte_carlo(
 @dataclass
 class SequencingRiskResult:
     """Results of a sequencing risk analysis."""
+
     worst_first_p_success: float
     worst_first_p5: float
     best_first_p_success: float
@@ -1392,10 +1486,15 @@ def run_sequencing_analysis(
     original_results: SimulationResults,
     seed: int | None = None,
 ) -> SequencingRiskResult:
-    """Assess sequencing risk by reordering return series.
+    """Assess sequencing risk by reordering drawdown-period returns.
 
-    Runs two additional passes: worst-first (reordering equity returns
-    ascending so the worst years hit earliest) and best-first (descending).
+    Runs two additional passes: worst-first (reordering drawdown-period
+    equity returns ascending so the worst drawdown years hit earliest)
+    and best-first (descending). Working years (before the earliest
+    retirement age) retain their original random order — only the
+    decumulation-phase returns are reordered, since that is where
+    sequencing risk matters.
+
     Uses Option A: equity, super z-score, AND inflation returns are all
     reordered identically to preserve within-year correlation.
 
@@ -1410,12 +1509,18 @@ def run_sequencing_analysis(
 
     Note:
         This is an opt-in analysis (~3× compute of a normal run).
+
     """
     if seed is not None:
         random.seed(seed)
 
     n_years = min(e.super_access_age for e in household.earners) - inputs.simulation_start_age
     n_trials = min(inputs.n_iterations, 10_000)  # Cap at 10k for speed
+
+    # Compute the drawdown start year (earliest retirement age)
+    employed_retirements = [e.retirement_age for e in household.earners if e.retirement_age < 999]
+    retire_age = min(employed_retirements) if employed_retirements else inputs.simulation_start_age
+    drawdown_start_year = retire_age - inputs.simulation_start_age
 
     def _run_with_order(direction: str) -> SimulationResults:
         """Run a simulation with returns reordered worst-first or best-first."""
@@ -1439,14 +1544,26 @@ def run_sequencing_analysis(
                 eq_returns.append(eq_r)
                 eq_zs.append(eq_z)
 
-            # Reorder all series together (preserve within-year correlation)
-            # Zip, sort by equity return ascending (worst returns first) or
-            # descending (best returns first), unzip
-            zipped = list(zip(eq_returns, eq_zs, inf_returns_list if inputs.stochastic_inflation else [0.0] * n_years))
+            # Reorder only the drawdown-period returns.
+            # Working years stay in their original (random) order — the
+            # sequencing risk that matters is the order of returns during
+            # the decumulation phase, when assets are being sold.
+            zipped = list(
+                zip(
+                    eq_returns,
+                    eq_zs,
+                    inf_returns_list if inputs.stochastic_inflation else [0.0] * n_years,
+                )
+            )
+            working = zipped[:drawdown_start_year]
+            drawdown = list(zipped[drawdown_start_year:])
             if direction == "worst_first":
-                zipped.sort(key=lambda x: x[0])  # ascending: smallest/worst returns first
+                drawdown.sort(key=lambda x: x[0])  # ascending: worst returns hit drawdown first
             else:
-                zipped.sort(key=lambda x: x[0], reverse=True)  # descending: largest/best returns first
+                drawdown.sort(
+                    key=lambda x: x[0], reverse=True
+                )  # descending: best returns hit drawdown first
+            zipped = working + drawdown
 
             re_eq, re_z, re_inf = zip(*zipped) if zipped else ([], [], [])
 
@@ -1514,6 +1631,7 @@ def run_sequencing_analysis(
 @dataclass
 class ScenarioComparisonResult:
     """A single scenario's result for comparison display."""
+
     label: str
     p_success: float
     bridge_p5: float
@@ -1540,6 +1658,7 @@ def run_scenario_comparison(
 
     Returns:
         Dict mapping scenario name to ScenarioComparisonResult.
+
     """
     from dataclasses import replace as dc_replace
 
@@ -1555,9 +1674,7 @@ def run_scenario_comparison(
         )
 
     # Scenario 2: No PT income
-    new_earners = tuple(
-        dc_replace(e, pt_days_per_week=0.0) for e in household.earners
-    )
+    new_earners = tuple(dc_replace(e, pt_days_per_week=0.0) for e in household.earners)
     hh_no_pt = dc_replace(household, earners=new_earners)
     inp_no_pt = dc_replace(inputs, household=hh_no_pt, n_iterations=n_trials)
     _run(hh_no_pt, inp_no_pt, "No PT income")
@@ -1582,6 +1699,7 @@ def run_scenario_comparison(
 @dataclass
 class RetirementSearchResult:
     """Result of an earliest-feasible-retirement-age search."""
+
     entered_age: int
     entered_p_success: float
     earliest_age: int
@@ -1616,6 +1734,7 @@ def run_retirement_search(
 
     Returns:
         RetirementSearchResult with entered vs earliest feasible age.
+
     """
     from dataclasses import replace as dc_replace
 

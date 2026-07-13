@@ -158,9 +158,3 @@ def delete_profile(profile_name: str) -> bool:
         path.unlink()
         return True
     return False
-
-
-def profile_exists(profile_name: str) -> bool:
-    """Check if a profile with the given name exists."""
-    filename = _sanitise_filename(profile_name) + ".json"
-    return (_profiles_dir() / filename).exists()
