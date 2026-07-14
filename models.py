@@ -138,7 +138,10 @@ class Earner:
     pt_days_per_week: float = 0.0
     pt_start_age: int = -1
     """Age at which part-time income begins. -1 (default) means use ``retirement_age``."""
-    pt_end_age: int = 65
+    pt_end_age: int = 0
+    """Age at which part-time income ends. 0 (default) means use
+    ``super_access_age`` (bridge horizon).
+    """
     pt_daily_rate: float = 3_000.0
     pt_weeks_per_year: float = 48.0
     pt_rate_mode: str = "daily_rate"
@@ -248,6 +251,9 @@ class Earner:
                 object.__setattr__(self, "pt_start_age", 60)
             else:
                 object.__setattr__(self, "pt_start_age", self.retirement_age)
+        # Resolve pt_end_age sentinel: 0 means "follow super_access_age"
+        if self.pt_end_age == 0:
+            object.__setattr__(self, "pt_end_age", self.super_access_age)
 
 
 @dataclass(frozen=True)
@@ -896,7 +902,7 @@ def _deserialise_earner(data: dict[str, Any]) -> Earner:
         employment_type=emp_type,
         pt_days_per_week=data.get("pt_days_per_week", 0.0),
         pt_start_age=data.get("pt_start_age", -1),
-        pt_end_age=data.get("pt_end_age", 65),
+        pt_end_age=data.get("pt_end_age", 0),
         pt_daily_rate=data.get("pt_daily_rate", 3_000.0),
         pt_weeks_per_year=data.get("pt_weeks_per_year", 48.0),
         pt_rate_mode=data.get("pt_rate_mode", "daily_rate"),
@@ -1216,7 +1222,7 @@ def _upgrade_v1_profile(data: dict[str, Any]) -> dict[str, Any]:
         pt_rate_mode=inputs.get("pt_rate_mode", "daily_rate"),
         pt_salary_pct=inputs.get("pt_salary_pct", 0.0),
         pt_start_age=inputs.get("pt_start_age", 50),
-        pt_end_age=inputs.get("pt_end_age", 52),
+        pt_end_age=inputs.get("pt_end_age", 0),
     )
     earner2 = Earner(
         label="Earner 2",

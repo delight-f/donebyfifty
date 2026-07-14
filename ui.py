@@ -470,7 +470,7 @@ def _configure_earner(
     # ── Part-time work post retirement ────────────────────────────
     pt_days = 0.0
     pt_start = -1
-    pt_end = 65
+    pt_end = super_access  # default: match bridge horizon
     pt_rate_mode = "daily_rate"
     pt_daily_rate = 3_000.0
     pt_salary_pct = 0.0
@@ -484,11 +484,7 @@ def _configure_earner(
             lo=0.5,
             hi=7,
         )
-        default_start = (
-            d.pt_start_age
-            if d.pt_start_age > 0
-            else (retire_age if employed and retire_age < 999 else 60)
-        )
+        default_start = retire_age if employed and retire_age < 999 else 60
         pt_start = _prompt_int("  Start age", default_start, lo=30, hi=75)
         pt_end = _prompt_int(
             "  End age",

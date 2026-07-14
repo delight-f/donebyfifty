@@ -1,10 +1,10 @@
-# BridgeCheck — Monte Carlo Retirement Bridge Simulator
+# DoneByFifty — Monte Carlo Retirement Bridge Simulator
 
 ## Overview
 
-BridgeCheck models the most financially fragile period in early retirement: the **bridge years** between leaving full-time work and gaining access to superannuation. For Australians retiring before preservation age, this gap — typically 5 to 20 years — must be funded entirely from non-super savings. Getting the numbers wrong means running out of money before super unlocks, with no Age Pension safety net during the bridge.
+DoneByFifty models the most financially fragile period in early retirement: the **bridge years** between leaving full-time work and gaining access to superannuation. For Australians retiring before preservation age, this gap — typically 5 to 20 years — must be funded entirely from non-super savings. Getting the numbers wrong means running out of money before super unlocks, with no Age Pension safety net during the bridge.
 
-BridgeCheck runs thousands of simulated futures to tell you not just *whether* your bridge plan works, but *how often* it fails, *when* it breaks, and *what drives* the risk.
+DoneByFifty runs thousands of simulated futures to tell you not just *whether* your bridge plan works, but *how often* it fails, *when* it breaks, and *what drives* the risk.
 
 
 ## Key Features
@@ -29,7 +29,7 @@ The simulator computes per-earner tax using the current marginal rate bracket sy
 
 ### Post-2027 CGT Reform (Fully Implemented)
 
-BridgeCheck models the 2026 Treasury Laws Amendment reforms:
+DoneByFifty models the 2026 Treasury Laws Amendment reforms:
 
 - **CPI-indexed cost basis:** only real (above-inflation) gains attract CGT — untaxed return of capital is correctly excluded, matching the policy intent of neutral investment incentives
 
@@ -39,7 +39,7 @@ BridgeCheck models the 2026 Treasury Laws Amendment reforms:
 
 ### Stochastic Financial Modelling
 
-BridgeCheck uses correlated stochastic processes to capture real-world uncertainty:
+DoneByFifty uses correlated stochastic processes to capture real-world uncertainty:
 
 - **Equity returns:** log-normal with configurable mean (7% default) and volatility (15% default), correlated across asset classes via Cholesky decomposition
 
@@ -66,7 +66,7 @@ BridgeCheck uses correlated stochastic processes to capture real-world uncertain
 
 ### Correlated Return Generation
 
-BridgeCheck generates multi-asset correlated returns using Cholesky decomposition, the standard approach in financial engineering for producing correlated Gaussian draws from independent normals. The correlation matrix is factorised once as L L^T $L L^T$, and correlated z-scores are obtained as $L \\cdot \\vec\{z\}$ where $\\vec\{z\}$ is a vector of independent standard normals.
+DoneByFifty generates multi-asset correlated returns using Cholesky decomposition, the standard approach in financial engineering for producing correlated Gaussian draws from independent normals. The correlation matrix is factorised once as L L^T $L L^T$, and correlated z-scores are obtained as $L \\cdot \\vec\{z\}$ where $\\vec\{z\}$ is a vector of independent standard normals.
 
 The model preserves the equity-super correlation ($\\rho \\approx 0.80$ by default), the equity-inflation correlation, and optionally the equity-mortgage-rate correlation ($\\rho = 0.20$ by default), all from a single Cholesky decomposition. Each year's shocks are drawn independently; multi-year dependency arises only through the mortgage rate's AR(1) structure.
 
