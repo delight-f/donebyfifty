@@ -2,19 +2,23 @@
 
 > A Monte Carlo simulator for the years between early retirement and superannuation access, with full Australian tax modelling.
 
-DoneByFifty answers one question: can your non-super assets carry you from retirement to preservation age without running dry? It runs the bridge years — the gap between leaving work and accessing superannuation — through thousands of Monte Carlo trials and reports the odds.
+DoneByFifty answers one question: can your non-super assets carry you from retirement to preservation age without running dry? It runs the bridge years (the gap between leaving work and accessing superannuation) through thousands of Monte Carlo trials to give you the odds.
 
 ---
 
 ## Motivation
 
-Most Australian retirement calculators answer "will I have enough super?" or "can I retire at 65?" Neither is much use to someone retiring at 45 with a 15-year gap before they can touch their super.
+Most Australian retirement calculators answer "will I have enough super?" or "can I retire at 65?" Neither is much use to someone retiring at 45 with a 15-year gap before they can touch their super. That gap has to be funded entirely from non-super savings, with no Age Pension safety net if the numbers are wrong.
 
-- Treats bridge-to-super as its own phase, with its own drawdown dynamics
-- Full Australian personal tax: bracket progression, Medicare Levy Surcharge, Division 293
-- Post-1-July-2027 CGT reform: 30% floor rate, tax withheld on real gains only
-- Household-level modelling: two earners, staggered retirements, part-time phases, kids and education costs
-- Multiple mortgages (P&I or interest-only), linked offset accounts, multi-class investment accounts
+DoneByFifty runs thousands of simulated futures to show not just whether a bridge plan works, but how often it fails, when it breaks, and what's driving the risk.
+
+## Key Features
+
+**Household modelling.** Up to two earners, each with their own salary trajectory, employment type (employed, self-employed, or both), part-time phases with custom daily rates and date ranges, and staggered retirement ages. Each earner has independent super with configurable asset allocations, growth/defensive glide paths, and optional non-concessional contributions. Add children with education cost schedules, multiple mortgages (P&I or interest-only) with linked offset accounts, and investment accounts across asset classes and tax jurisdictions (AU/UK). Jointly held accounts split taxable income by ownership share for CGT.
+
+**Tax and CGT.** Full Australian personal tax with bracket progression, Medicare Levy Surcharge, and Division 293, plus the post-1-July-2027 CGT reform: CPI-indexed cost basis so only real gains attract tax, and a 30% minimum rate floor per owner. See Mathematical Soundness below for how the reform is implemented.
+
+**Risk analysis.** Sequencing risk analysis re-orders return histories (worst-first vs best-first) to isolate how much return *order*, not just return level, affects bridge viability. Scenario comparison runs the same household under alternative assumptions — no part-time income, full offset drawdown — and lines up the results side by side. Bootstrap standard errors use 200 resamples with colour-coded relative SE, so you know when a result needs more trials before you trust it. An earliest-feasible-retirement-age search binary-searches over retirement age to find the youngest age that still clears your success threshold. Drawdown composition tracking gives a per-year breakdown of offset vs non-offset funding and CGT paid, with running totals across the bridge.
 
 ---
 
@@ -63,7 +67,7 @@ tests/           — pytest suite: golden values, property tests, integration te
 4. In bridge-only mode, project drawdown through to super access age
 5. Score success or failure — did the bridge assets survive to preservation age?
 
-Results are seed-locked. Same inputs, same seed, same output, every time.
+Results are seed-locked, so a given set of inputs and seed will always reproduce the same output.
 
 ---
 
@@ -81,6 +85,36 @@ All returns are real (inflation-adjusted). The simulation compounds in real term
 | Super (equity-like) | 7.0% | 15.0% | Unsourced placeholder |
 
 All volatility figures are unsourced placeholders. The correlation matrix lives in `primitives.py` — equity/property 0.7, equity/bonds −0.2, etc.
+
+---
+
+## Mathematical Soundness
+
+### Correlated returns via Cholesky decomposition
+
+Equity, super, inflation, and mortgage-rate shocks aren't independent in reality, and treating them as independent understates tail risk. DoneByFifty generates them as correlated draws: the correlation matrix is factorised once via Cholesky decomposition, and each year's independent standard normals are transformed through that factor to produce correlated z-scores. This preserves the equity-super correlation, the equity-inflation correlation, and (when stochastic mortgage rates are enabled) the equity-mortgage-rate correlation, all from a single decomposition rather than three separate approximations. Each year's shocks are still drawn independently of other years — the only multi-year dependency comes from the mortgage rate's own AR(1) structure, below.
+
+### Black-Karasinski mortgage rates
+
+Mortgage rates are modelled with a discrete-time Black-Karasinski process rather than a flat assumption or a simple random walk. Rates evolve log-normally and mean-revert toward a long-run level (default 6.5%, ~95% interval roughly 3.7%–11.4% under moderate volatility), with mean-reversion strength κ = 0.20/year (half-life ~3.5 years). Log-normal dynamics rule out negative rates by construction, which a naive Gaussian model doesn't.
+
+The implementation uses the exact discretisation of the underlying Ornstein-Uhlenbeck process in log-space, not the more common Euler approximation. Over a 10-year horizon the exact and Euler discretisations diverge by about 25.6% in persistence — a gap that compounds meaningfully over multi-decade bridge simulations, which is why the exact form was used.
+
+### CGT: fixing a discount-doubling error
+
+An earlier version of the model applied both CPI cost-basis indexation and the old 50% CGT discount to the same gain. The Treasury reform replaces the discount with indexation; the two don't stack, and applying both understated tax for high earners. The error was caught in a line-by-line audit against the policy text and corrected — earners in the 37% and 45% brackets now correctly pay their full marginal rate (subject to the 30% floor) on real gains only, with no residual discount. The corrected CGT algorithm also handles cost-basis proportioning (only the gain fraction of each sale is taxed), gross-up for tax (solving for the pre-tax sale amount needed to net a required after-tax spend, rather than treating the after-tax figure as the sale amount), and per-owner weighted averaging for jointly held accounts.
+
+### RNG isolation
+
+Each stochastic subsystem draws from its own seeded generator with a separate seed-space region. Equity and inflation series are pre-generated per trial from a dedicated generator, so switching on stochastic mortgage rates or stochastic inflation doesn't change the equity path for a given seed. This means a same-seed comparison with and without a given stochastic feature isolates the effect of that feature, rather than conflating it with an unrelated change in the random path.
+
+### Conservative defaults
+
+Where policy is ambiguous or the real-world outcome depends on taxpayer behaviour, the model defaults conservatively: Division 293 tax is deducted from take-home pay rather than paid from super (the worse case for bridge viability); a bridge failure lets the simulation continue with unmet spending accumulating, rather than assuming a default or restructure; success requires bridge assets to stay above zero at every timestep, not just at the end of the horizon; and all bridge values are reported in today's dollars to avoid nominal-dollar illusion.
+
+### Golden-value verification
+
+Two deterministic end-to-end tests check the model against hand calculations: a single-earner scenario whose bridge and super values match independently computed figures to the dollar, and a CGT drawdown scenario that confirms the bridge stays positive through a full drawdown under known tax parameters.
 
 ---
 
@@ -165,5 +199,5 @@ Default profiles directory: `./profiles/` (gitignored).
 
 - Return assumptions are real, not nominal. Input your expected real returns accordingly.
 - Historical means are not forecasts. The 7% equity assumption may be optimistic relative to current valuation-adjusted forward estimates — sensitivity-test your plan.
-- Tax rules are current as at July 2026. The CGT reform is modelled as legislated for 1 July 2027. No future policy changes are assumed.
-- This is a planning tool, not financial advice. Consult a licensed adviser before making decisions.
+- Tax rules are current as at July 2026, and the CGT reform is modelled as legislated for 1 July 2027 with no allowance for further policy changes.
+- This is a planning tool. It doesn't replace advice from a licensed financial adviser.
