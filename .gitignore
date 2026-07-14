@@ -28,3 +28,7 @@ profiles/
 *~
 .DS_Store
 Thumbs.db
+
+# --- Personal ---
+#
+# analysis/
