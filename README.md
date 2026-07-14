@@ -8,9 +8,9 @@ DoneByFifty answers one question: can your non-super assets carry you from retir
 
 ## Motivation
 
-Most Australian retirement calculators answer "will I have enough super?" or "can I retire at 65?" Neither is much use to someone retiring at 45 with a 15-year gap before they can touch their super. That gap has to be funded entirely from non-super savings, and there's no Age Pension safety net if the numbers are wrong.
+Most Australian retirement calculators answer "will I have enough super?" or "can I retire at 65?" Neither is much help to someone retiring at 45 with a 15-year gap before they can touch their super. That gap has to be funded entirely from non-super savings, and there is no Age Pension safety net if the numbers are wrong.
 
-DoneByFifty runs thousands of simulated futures. The output isn't just whether a bridge plan works. It shows how often it fails, when it tends to break, and what's driving the risk.
+DoneByFifty runs thousands of simulated futures. The output isn't just whether a bridge plan works. It shows how often it fails, when it tends to break, and what is driving the risk.
 
 ## Key Features
 
@@ -18,7 +18,7 @@ DoneByFifty runs thousands of simulated futures. The output isn't just whether a
 
 **Tax and CGT.** Full Australian personal tax with bracket progression, Medicare Levy Surcharge, and Division 293, plus the post-1-July-2027 CGT reform: CPI-indexed cost basis so only real gains attract tax, and a 30% minimum rate floor per owner. The Mathematical Soundness section below covers how the reform is implemented.
 
-**Risk analysis.** Sequencing risk analysis re-orders return histories, worst-first versus best-first, to isolate how much return order (as distinct from return level) affects bridge viability. Scenario comparison runs the same household under alternative assumptions, such as no part-time income or full offset drawdown, and lines up the results side by side. Bootstrap standard errors use 200 resamples with colour-coded relative SE, so you can tell when a result needs more trials before you rely on it. An earliest-feasible-retirement-age search binary-searches over retirement age to find the youngest age that still meets your success threshold. Drawdown composition tracking gives a per-year breakdown of offset versus non-offset funding and CGT paid, with running totals across the bridge.
+**Risk analysis.** Sequencing risk analysis re-orders return histories, worst-first versus best-first, to isolate how much return order (as distinct from return level) affects bridge viability. Scenario comparison runs the same household under alternative assumptions, such as no part-time income or full offset drawdown, and sets the results out side by side. Bootstrap standard errors use 200 resamples with colour-coded relative SE, so you can tell when a result needs more trials before you trust it. An earliest-feasible-retirement-age search binary-searches over retirement age to find the youngest age that still meets your success threshold. Drawdown composition tracking gives a per-year breakdown of offset versus non-offset funding and CGT paid, with running totals across the bridge.
 
 ---
 
@@ -200,4 +200,4 @@ Default profiles directory: `./profiles/` (gitignored).
 - Return assumptions are real, not nominal. Input your expected real returns accordingly.
 - Historical means are not forecasts. The 7% equity assumption may be optimistic relative to current valuation-adjusted forward estimates, so sensitivity-test your plan.
 - Tax rules are current as at July 2026, and the CGT reform is modelled as legislated for 1 July 2027 with no allowance for further policy changes.
-- This is a planning tool. It doesn't replace advice from a licensed financial adviser.
+- This is a planning tool. It does not replace advice from a licensed financial adviser.
