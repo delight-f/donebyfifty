@@ -92,11 +92,11 @@ All returns are real (inflation-adjusted). The simulation compounds in real term
 | Asset Class | Real Return (μ) | Volatility (σ) | Confidence |
 |---|---|---|---|
 | Australian Equity | 7.0% | 15.0% | Sourced: Credit Suisse/UBS Global Investment Returns Yearbook (since 1900 ≈ 6.4–6.7%) |
-| International Equity | 7.0% | 17.0% | Unsourced placeholder |
+| International Equity | 7.0% | 17.0% | Assumed|
 | Bonds | 3.0% | 5.0% | Sourced: RBA Bulletin (Fraser 1991, ~1.5% real to 1990); current figure sits above historical |
 | Cash | 2.5% | 2.0% | Derived estimate; sits at upper edge of 1–2% range implied by sources |
 | Property | 5.0% | 12.0% | Derived: CoreLogic capital growth ~3.5–4% real plus estimated net rental yield ~2–3% |
-| Super (equity-like) | 7.0% | 15.0% | Unsourced placeholder |
+| Super (equity-like) | 7.0% | 15.0% | Assumed |
 
 All volatility figures are unsourced placeholders. The correlation matrix lives in `primitives.py`: equity/property 0.7, equity/bonds −0.2, and so on.
 
