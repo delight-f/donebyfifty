@@ -2,7 +2,9 @@
 
 > A Monte Carlo simulator for the years between early retirement and superannuation access, with full Australian tax modelling.
 
-DoneByFifty answers one question: can your non-super assets carry you from retirement to preservation age without running dry? It runs the bridge years, the gap between leaving work and accessing superannuation, through thousands of Monte Carlo trials to give you the odds.
+DoneByFifty answers one question: can your non-super assets carry you from retirement to preservation age without running dry? 
+
+It runs the bridge years, the gap between leaving work and accessing superannuation, through thousands of Monte Carlo trials to give you the odds.
 
 ---
 
