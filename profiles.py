@@ -20,16 +20,20 @@ from models import Profile
 
 
 def _profiles_dir() -> Path:
-    """Resolve the profiles directory path.
-
-    When running as a PyInstaller executable, profiles live next to the
-    executable (not in the temp extraction directory).
-    When running as a script, profiles live next to the script.
-    """
-    if getattr(sys, "frozen", False):
-        base = Path(sys.executable).parent
+    """Resolve the profiles directory path — always the folder
+    containing the actual exe on disk, regardless of build tool
+    or how/where the exe was launched from."""
+    if "__compiled__" in globals():
+        # Nuitka (onefile or standalone): sys.argv[0] is the real exe path,
+        # NOT the temp extraction dir. This is reliable in both modes.
+        base = Path(sys.argv[0]).resolve().parent
+    elif getattr(sys, "frozen", False):
+        # PyInstaller
+        base = Path(sys.executable).resolve().parent
     else:
+        # Plain python main.py
         base = Path(__file__).resolve().parent
+
     profiles_path = base / "profiles"
     profiles_path.mkdir(exist_ok=True)
     return profiles_path
@@ -124,8 +128,8 @@ def list_profiles() -> list[dict[str, Any]]:
                     "file": fpath.name,
                 }
             )
-        except (json.JSONDecodeError, KeyError):
-            # Skip corrupt files
+        except Exception:
+            # Skip corrupt or unparseable files
             results.append(
                 {
                     "name": fpath.stem,

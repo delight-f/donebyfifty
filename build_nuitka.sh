@@ -3,8 +3,9 @@
 # Creates a single-file executable (or standalone directory)
 #
 # Usage:
-#   ./build_nuitka.sh            — build onefile exe (default)
-#   ./build_nuitka.sh standalone — build standalone directory (faster, easier debug)
+#   ./build_nuitka.sh            — build standalone (default, works with profiles)
+#   ./build_nuitka.sh onefile    — build onefile exe (note: cannot resolve
+#                                   exe dir — profiles won't be found)
 #   ./build_nuitka.sh clean      — remove all build artifacts
 #   ./build_nuitka.sh test       — build onefile then run to verify
 #   ./build_nuitka.sh clean test — clean, build, test
@@ -12,7 +13,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-MODE="onefile"
+MODE="standalone"
 DO_CLEAN=""
 DO_TEST=""
 
@@ -42,36 +43,35 @@ echo ""
 echo "Starting build (this will take a few minutes)..."
 echo ""
 
-FLAGS="--assume-yes-for-downloads --show-progress"
+FLAGS="--assume-yes-for-downloads"
 FLAGS="$FLAGS --output-filename=montecarlo-cli"
 FLAGS="$FLAGS --output-dir=dist"
-FLAGS="$FLAGS --enable-plugin=upx"
+
+# Parallel compilation
+NUM_CPUS=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
+FLAGS="$FLAGS --jobs=$NUM_CPUS"
+
+# Include Rich's data files (themes, etc.)
+FLAGS="$FLAGS --include-package-data=rich"
 
 # Include Rich submodules that Rich lazy-loads at runtime
-FLAGS="$FLAGS --include-module=rich.panel"
-FLAGS="$FLAGS --include-module=rich.table"
-FLAGS="$FLAGS --include-module=rich.progress"
-FLAGS="$FLAGS --include-module=rich.progress_bar"
-FLAGS="$FLAGS --include-module=rich.prompt"
-FLAGS="$FLAGS --include-module=rich.text"
-FLAGS="$FLAGS --include-module=rich.layout"
-FLAGS="$FLAGS --include-module=rich.box"
-FLAGS="$FLAGS --include-module=rich.markup"
-FLAGS="$FLAGS --include-module=rich.style"
-FLAGS="$FLAGS --include-module=rich.syntax"
-FLAGS="$FLAGS --include-module=rich.highlighter"
-FLAGS="$FLAGS --include-module=rich.ansi"
-FLAGS="$FLAGS --include-module=rich.live"
-FLAGS="$FLAGS --include-module=rich.live_render"
-FLAGS="$FLAGS --include-module=rich.measure"
-FLAGS="$FLAGS --include-module=rich.emoji"
-FLAGS="$FLAGS --include-module=rich.json"
-FLAGS="$FLAGS --include-module=rich.tree"
-FLAGS="$FLAGS --include-module=rich.columns"
+RICH_MODS="panel table progress prompt text layout box markup style syntax highlighter ansi live live_render measure emoji json tree columns"
+for mod in $RICH_MODS; do
+    FLAGS="$FLAGS --include-module=rich.$mod"
+done
 
-# On macOS, include the icon if available
-if [ -f "assets/icon.ico" ]; then
-    FLAGS="$FLAGS --windows-icon-from-ico=assets/icon.ico"
+# UPX compression (optional — requires upx to be installed)
+if command -v upx &>/dev/null; then
+    FLAGS="$FLAGS --enable-plugin=upx"
+else
+    echo "[INFO] upx not found — skipping UPX compression"
+fi
+
+# Windows icon (Windows only)
+if [ "$(uname -s 2>/dev/null)" = "MINGW" ] || [ "${OS:-}" = "Windows_NT" ]; then
+    if [ -f "assets/icon.ico" ]; then
+        FLAGS="$FLAGS --windows-icon-from-ico=assets/icon.ico"
+    fi
 fi
 
 if [ "$MODE" = "onefile" ]; then
