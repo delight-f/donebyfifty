@@ -490,7 +490,10 @@ class SimulationInputs:
     div293_rate: float = 0.15
     """Division 293 additional tax rate on concessional contributions above threshold."""
     div293_growth_rate: float = 0.025
-    """Annual indexation of the Division 293 threshold."""
+    """DEPRECATED — Division 293 threshold is statutory at $250,000 since
+    1 July 2017 and is not indexed. This field is retained for backward
+    compatibility with existing profiles but is no longer used in the engine.
+    """
     surplus_investment_pct: float = 0.0
     """Percentage of annual surplus to allocate to non-offset investment accounts
     (the remainder goes to offset accounts or cash).

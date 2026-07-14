@@ -4,91 +4,115 @@
 
 BridgeCheck models the most financially fragile period in early retirement: the **bridge years** between leaving full-time work and gaining access to superannuation. For Australians retiring before preservation age, this gap — typically 5 to 20 years — must be funded entirely from non-super savings. Getting the numbers wrong means running out of money before super unlocks, with no Age Pension safety net during the bridge.
 
-BridgeCheck runs thousands of simulated futures to show not just whether your bridge plan works, but how often it fails, when it breaks, and what drives the risk.
+BridgeCheck runs thousands of simulated futures to tell you not just *whether* your bridge plan works, but *how often* it fails, *when* it breaks, and *what drives* the risk.
 
----
 
 ## Key Features
 
 ### Realistic Household Modelling
 
-Model up to two earners with their own salary trajectories, employment types (employed, self-employed, or both), part-time work phases with custom daily rates and date ranges, and staggered retirement ages. Each earner has independent superannuation with configurable asset allocations, growth-to-defensive glide paths, and optional non-concessional contributions.
+Model up to two earners with distinct salary trajectories, employment types (employed, self-employed, or both), part-time work phases with custom daily rates and date ranges, and staggered retirement ages. Each earner has independent superannuation — with configurable asset allocations, growth/defensive glide paths, and optional non-concessional contributions.
 
-Add children with education cost schedules, multiple mortgages (principal-and-interest or interest-only) with linked offset accounts, and investment accounts across different asset classes and tax jurisdictions (AU/UK). Jointly-held accounts split CGT liability by ownership share per earner.
+Add children with education cost schedules, multiple mortgages (P&I or interest-only) with linked offset accounts, and multiple investment accounts across different asset classes and tax jurisdictions (AU/UK). Accounts can be jointly held with per-owner taxable-income splitting for CGT.
 
 ### Full Australian Tax Model
 
-Per-earner tax is computed against the current marginal rate bracket system, including:
+The simulator computes per-earner tax using the current marginal rate bracket system, including:
 
-- **Medicare Levy Surcharge:** progressive tiered rates (1.0% / 1.25% / 1.5%) based on singles and couple income thresholds
-- **Division 293 tax:** additional 15% on concessional contributions above the indexed threshold
-- **Concessional cap tracking:** auto-sacrifice logic with annually-indexed caps and salary-growth-aware SG computation
-- **Bracket creep:** tax thresholds and policy caps index annually to preserve real tax burden
+- **Progressive Medicare Levy Surcharge:** tiered rates (1.0% / 1.25% / 1.5%) based on singles or couple income thresholds
 
-### Post-2027 CGT Reform
+- **Division 293 tax:** additional 15% on concessional contributions above $250,000, with annual indexation
 
-BridgeCheck implements the Treasury Laws Amendment (Tax Reform No. 1) Act 2026:
+- **Concessional cap tracking:** auto-sacrifice logic with indexed caps and salary-growth-aware SG computation
 
-- **CPI-indexed cost basis:** only real (above-inflation) gains attract CGT — untaxed return of capital is correctly excluded. Cumulative inflation is tracked per-year and applied to every sale transaction.
-- **30% minimum rate floor:** the effective CGT rate per owner is `max(marginal_rate, 0.30)`, weighted by ownership share. This prevents high earners from deferring capital gains into low-income years.
-- **Correct gross-up:** the model solves for the gross sale amount needed to net a given after-tax spending requirement, rather than naively treating the after-tax need as the pre-tax sale amount.
+- **Bracket creep:** tax thresholds index annually to preserve real tax burden
+
+### Post-2027 CGT Reform (Fully Implemented)
+
+BridgeCheck models the 2026 Treasury Laws Amendment reforms:
+
+- **CPI-indexed cost basis:** only real (above-inflation) gains attract CGT — untaxed return of capital is correctly excluded, matching the policy intent of neutral investment incentives
+
+- **30% minimum rate floor:** `max(marginal\_rate, 0.30)` per owner, weighted by ownership share, correctly preventing high earners from deferring gains into low-income years
+
+- **Per-year inflation tracking:** cumulative inflation factor applied to every sell transaction, not just annualised
 
 ### Stochastic Financial Modelling
 
-Correlated stochastic processes capture the uncertainty that matters:
+BridgeCheck uses correlated stochastic processes to capture real-world uncertainty:
 
-- **Equity returns:** log-normal, configurable mean and volatility, correlated across asset classes
-- **Super returns:** per-earner — each earner's super can be allocated across equity, bonds, cash, property, and international equity, each with its own risk/return profile
-- **Mortgage rates:** Black-Karasinski mean-reverting model producing plausible rate paths that stay positive even in extreme scenarios
-- **Stochastic inflation:** optionally modelled as a correlated process alongside equity and super returns, so inflation surprises are consistent with the asset return environment
+- **Equity returns:** log-normal with configurable mean (7% default) and volatility (15% default), correlated across asset classes via Cholesky decomposition
+
+- **Super returns:** per-earner asset class returns (equity, bonds, cash, property, international equity), each with its own risk/return profile, computed from a shared equity z-score to preserve the equity-super correlation structure
+
+- **Mortgage rates:** Black-Karasinski mean-reverting log-normal model (see Mathematical Soundness section) for stochastic interest rate paths
+
+- **Inflation:** configurable as either a flat assumption or a correlated stochastic process (3-way Cholesky with equity and super), so inflation surprises are not independent of asset returns
 
 ### Risk Analysis Suite
 
-- **Sequencing risk:** reorders return histories into "worst returns first" and "best returns first" orderings to isolate the impact of return *sequence* on bridge viability
-- **Scenario comparison:** runs the same household under alternative assumptions (e.g., no part-time income, full offset depletion) and compares results side-by-side
-- **Bootstrap standard errors:** 200-resample bootstrap with colour-coded relative standard errors so you can judge result stability: green under 2%, yellow 2–4%, orange 5–9%, red above 10%
-- **Earliest feasible retirement age:** binary search over retirement age to find the youngest age that meets your success threshold
-- **Drawdown composition:** per-year breakdown of offset vs non-offset funding and CGT paid, with cumulative totals
+- **Sequencing risk analysis:** re-orders return histories to simulate "worst returns first" vs "best returns first" scenarios, isolating the impact of return order on the bridge's viability independent of the return *level*
 
----
+- **Scenario comparison:** runs the same household under alternative assumptions (e.g., no part-time income, full offset drawdown) and compares key metrics side-by-side
 
-## Mathematical Approach
+- **Bootstrap standard errors:** 200-resample bootstrap with color-coded relative SE (%): green \<2%, yellow 2–4%, orange 5–9%, red ≥10% — so you know when to increase trial count or report results with caution
 
-### Correlated Returns
+- **Earliest feasible retirement age:** binary search over retirement age to find the youngest age that achieves a user-defined success threshold
 
-Multi-asset correlated returns use Cholesky decomposition, the standard technique in financial simulation. A correlation matrix is factorised as LLᵀ, and correlated z-scores are computed as L·z where z is a vector of independent standard normals.
+- **Drawdown composition tracking:** per-year breakdown of offset vs non-offset funding sources and CGT paid, with cumulative totals across the bridge
 
-The model preserves the equity-super correlation (approximately 0.80), equity-inflation correlation, and optionally equity-mortgage-rate correlation (0.20), all from a single decomposition. Each year's shocks are drawn independently; year-to-year dependency exists only through the mortgage rate's autoregressive structure.
 
-### Mortgage Rate Model
+## Mathematical Soundness
 
-Mortgage interest rates follow a discrete-time Black-Karasinski model — the standard for interest rate derivatives where rates must remain positive under all realisations. The log-rate evolves as a mean-reverting process around a long-run mean θ:
+### Correlated Return Generation
 
-> log(r_t₊₁) = log(θ) + φ · (log(r_t) − log(θ)) + σ_ε · ε_t
+BridgeCheck generates multi-asset correlated returns using Cholesky decomposition, the standard approach in financial engineering for producing correlated Gaussian draws from independent normals. The correlation matrix is factorised once as L L^T $L L^T$, and correlated z-scores are obtained as $L \\cdot \\vec\{z\}$ where $\\vec\{z\}$ is a vector of independent standard normals.
 
-where φ = exp(−κ) is the persistence coefficient (κ = 0.20/year gives a half-life of approximately 3.5 years), and σ_ε is the discrete shock volatility calibrated from the continuous-time parameter.
+The model preserves the equity-super correlation ($\\rho \\approx 0.80$ by default), the equity-inflation correlation, and optionally the equity-mortgage-rate correlation ($\\rho = 0.20$ by default), all from a single Cholesky decomposition. Each year's shocks are drawn independently; multi-year dependency arises only through the mortgage rate's AR(1) structure.
 
-The model uses exact discretisation (φ = e^(−κΔt)) rather than the Euler approximation (φ ≈ 1 − κΔt). This difference compounds over multi-decade bridges. Under default parameters the rates stay within a ~95% band of roughly 3.7% to 11.4%, mean-reverting to a 6.5% long-run average.
+### Black-Karasinski Mortgage Rate Model
 
-### CGT Cost-Basis Indexation
+Mortgage interest rates follow a discrete-time Black-Karasinski (BK) model, a standard in interest rate derivatives for its ability to prevent negative rates via log-normal dynamics:
 
-When assets are sold, the taxable gain is the sale proceeds minus the CPI-indexed cost basis — not the full proceeds. The model tracks cost bases per account and applies the cumulative inflation factor at sale time. Only the real gain fraction attracts CGT, consistent with the policy goal of neutral investment incentives.
+ln(r\_(t+1)) = ln(θ) + φ(ln(r\_t) − ln(θ)) + σ\_ε · ε\_t 
 
-For jointly-held accounts, the effective CGT rate is the ownership-weighted average of each earner's rate after the 30% floor: `Σ(shareᵢ · max(marginal_rateᵢ, 0.30))`.
+where φ = e^(−κ)  is the exact AR(1) coefficient (mean-reversion strength $\\kappa$, default 0.20/year, half-life ≈ 3.5 years), and σ\_ε = σ̃ √((1 − φ²) / (2κ)) is the discrete shock volatility calibrated to produce a stationary distribution consistent with the continuous-time parameter $\\tilde\{\\sigma\}$.
+
+The model uses the **exact discretisation** of the OU process in log-space, not the Euler approximation ($\\phi \\approx 1 - \\kappa$). Over a 10-year horizon, exact persistence is $e^\{-10\\kappa\} = 0.135$ vs Euler $0.107$ — a 25.6% difference that compounds over multi-decade bridges. The stationary distribution has mean $\\theta$ (default 6.5%) with a ~95% interval of approximately \[3.7%, 11.4%\] under moderate volatility.
+
+### CGT: Indexation, Floor, and the No-Discount-Doubling Error
+
+Prior versions of the code incorrectly applied both CPI indexation AND the 50% CGT discount, computing `max(marginal\_rate × 0.5, 0.30)`. The Treasury reform *replaces* the discount with indexation — they do not stack. The corrected formula is `max(marginal\_rate, 0.30)`, which means earners in the 37% and 45% brackets pay at their full marginal rate on real gains. The model was corrected after a line-by-line audit confirmed the error against the policy text.
+
+The CGT algorithm correctly handles:
+
+- **Cost-basis proportioning:** only the gain fraction of each sale ($1 - \\text\{basis\} / \\text\{market\_value\}$) is taxed
+
+- **Gross-up for tax:** the model solves for the gross sale amount needed to net the required after-tax spending, avoiding the common mistake of treating after-tax needs as the pre-tax sale amount
+
+- **Per-owner weighted averaging:** for jointly-held accounts, each owner's rate is computed independently and weighted by their ownership share
 
 ### RNG Isolation
 
-Equity and inflation return series are pre-generated per trial with a dedicated random number generator separate from the per-trial simulation RNG. Changing a stochastic setting (such as enabling mortgage rate volatility or stochastic inflation) does not alter equity paths for a given seed. This means "what if?" comparisons — same seed, different mortgage rate assumption — produce genuinely comparable results rather than conflating model changes with path changes.
+All stochastic subsystems use isolated random number generators with separate seed-space regions. Equity and inflation return series are pre-generated at the trial level using a dedicated `series\_rng`, ensuring that changing one subsystem's stochastic settings (e.g., enabling stochastic mortgage rates or inflation) does not alter the equity paths for a given seed. This makes "what-if" comparisons — running the same seed with and without stochastic mortgage rates — produce genuinely comparable results rather than conflating model changes with path changes.
 
 ### Conservative Defaults
 
-Where policy is ambiguous or outcomes depend on taxpayer behaviour, the model defaults conservatively:
+The model defaults to conservative assumptions where the policy is ambiguous or the real-world outcome depends on taxpayer behaviour:
 
-- **Division 293 tax** is paid from take-home income rather than released from super, maximising the cash-flow burden on the bridge
-- **Bridge failure** continues the simulation rather than halting — unmet spending accumulates, producing a clean lower bound rather than assuming the household restructures or defaults
-- **Success** requires bridge assets stay above zero at every timestep (running-minimum check), not just at the final horizon
-- **Bridge values** are deflated to simulation-start purchasing power, avoiding nominal-dollar illusion
+- **Division 293 tax** is deducted from take-home pay, not paid from super (worst case for bridge viability)
 
-### Validation
+- **Bridge failure** continues the simulation rather than halting — unmet spending accumulates, so the model does not assume a borrower defaults or restructures, producing a clean lower bound
 
-Deterministic end-to-end tests verify the model against hand calculations — bridge and super values match independently-computed figures to the dollar. A CGT drawdown test confirms the drawdown completes with a positive bridge under known tax parameters. A suite of 177 automated tests covers edge cases across earner counts, mortgage types, account configurations, and tax scenarios.
+- **Success** is defined as bridge assets staying above zero at every timestep (running minimum check), not just at the final horizon
+
+- **Bridge values** are reported in today's dollars (deflated to simulation-start purchasing power), preventing nominal-dollar illusion
+
+### Golden-Value Verification
+
+Two deterministic end-to-end tests verify the model against hand calculations: a single-earner scenario produces bridge and super values matching independently-computed figures to the dollar, and a CGT drawdown scenario confirms the bridge stays positive through the full drawdown with known tax parameters.
+
+### Audit Trail
+
+The codebase underwent a structured 13-finding audit covering financial model trace, Monte Carlo mechanics, edge-case handling, and UI consistency. All findings rated "major" or above were addressed and verified by the test suite. Outstanding items rated "minor" (birth-date-granular preservation age, back-to-main-menu UX flow) are documented and deferred by informed choice, not oversight.
+

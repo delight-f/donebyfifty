@@ -311,13 +311,15 @@ def simulate_working_year(
         takehome = total_gross - income_tax - sacrifice
 
         # Division 293 tax paid from take-home (worst-case assumption).
+        # Division 293: 15% on the LESSER of (concessional contributions,
+        # div293_income - $250k threshold). The threshold is statutory and
+        # has been $250,000 since 1 July 2017 — it is NOT indexed.
         # In practice, the taxpayer can elect to release excess contributions
         # from super to cover this tax, reducing the cash-flow impact.
-        # Division 293: additional 15% tax on concessional contributions above threshold
         div293_income = taxable + sg + sacrifice  # combined income + contributions
-        indexed_div293_threshold = inputs.div293_threshold * (1 + inputs.div293_growth_rate) ** y
-        if div293_income > indexed_div293_threshold and (sg + sacrifice) > 0:
-            excess = min(sg + sacrifice, div293_income - indexed_div293_threshold)
+        div293_threshold = inputs.div293_threshold  # statutory, not indexed
+        if div293_income > div293_threshold and (sg + sacrifice) > 0:
+            excess = min(sg + sacrifice, div293_income - div293_threshold)
             div293_tax = excess * inputs.div293_rate
             takehome -= div293_tax  # paid from take-home (worst-case assumption)
 

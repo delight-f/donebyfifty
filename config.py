@@ -26,7 +26,7 @@ DIV293_RATE: Final[float] = 0.15  # Division 293 additional tax rate
 
 # Default indexation rates for policy parameters (used in UI warnings)
 DEFAULT_CONC_CAP_GROWTH_RATE: Final[float] = 0.03  # annual growth for concessional cap
-DEFAULT_DIV293_GROWTH_RATE: Final[float] = 0.025  # annual growth for Div 293 threshold
+DEFAULT_DIV293_GROWTH_RATE: Final[float] = 0.025  # DEPRECATED — Div 293 threshold is statutory, not indexed
 
 # =============================================================================
 # TAX CACHE CLEARING
