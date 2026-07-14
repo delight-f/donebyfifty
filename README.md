@@ -2,9 +2,7 @@
 
 > A Monte Carlo simulator for the years between early retirement and superannuation access, with full Australian tax modelling.
 
-DoneByFifty answers one question: can your non-super assets carry you from retirement to preservation age without running dry? 
-
-It runs the bridge years, the gap between leaving work and accessing superannuation, through thousands of Monte Carlo trials to give you the odds.
+DoneByFifty answers one question: can your non-super assets carry you from retirement to preservation age without running dry? It runs the bridge years, the gap between leaving work and accessing superannuation, through thousands of Monte Carlo trials to give you the odds.
 
 ---
 
@@ -16,11 +14,25 @@ DoneByFifty runs thousands of simulated futures. The output isn't just whether a
 
 ## Key Features
 
-**Household modelling.** Up to two earners, each with their own salary trajectory, employment type (employed, self-employed, or both), part-time phases with custom daily rates and date ranges, and staggered retirement ages. Each earner has independent super with configurable asset allocations, growth/defensive glide paths, and optional non-concessional contributions. Add children with education cost schedules, multiple mortgages (P&I or interest-only) with linked offset accounts, and investment accounts across asset classes and tax jurisdictions (AU/UK). Jointly held accounts split taxable income by ownership share for CGT purposes.
+**Household modelling.**
+- Up to two earners, each with an independent salary trajectory, employment type (employed, self-employed, or both), part-time phases with custom daily rates and date ranges, and a staggered retirement age
+- Independent super per earner, with configurable asset allocations, growth/defensive glide paths, and optional non-concessional contributions
+- Children with education cost schedules
+- Multiple mortgages (P&I or interest-only) with linked offset accounts
+- Investment accounts across asset classes and tax jurisdictions (AU/UK)
+- Jointly held accounts split taxable income by ownership share for CGT purposes
 
-**Tax and CGT.** Full Australian personal tax with bracket progression, Medicare Levy Surcharge, and Division 293, plus the post-1-July-2027 CGT reform: CPI-indexed cost basis so only real gains attract tax, and a 30% minimum rate floor per owner. The Mathematical Soundness section below covers how the reform is implemented.
+**Tax and CGT.**
+- Full Australian personal tax: bracket progression, Medicare Levy Surcharge, Division 293
+- Post-1-July-2027 CGT reform: CPI-indexed cost basis so only real gains attract tax, plus a 30% minimum rate floor per owner
+- See Mathematical Soundness below for how the reform is implemented
 
-**Risk analysis.** Sequencing risk analysis re-orders return histories, worst-first versus best-first, to isolate how much return order (as distinct from return level) affects bridge viability. Scenario comparison runs the same household under alternative assumptions, such as no part-time income or full offset drawdown, and sets the results out side by side. Bootstrap standard errors use 200 resamples with colour-coded relative SE, so you can tell when a result needs more trials before you trust it. An earliest-feasible-retirement-age search binary-searches over retirement age to find the youngest age that still meets your success threshold. Drawdown composition tracking gives a per-year breakdown of offset versus non-offset funding and CGT paid, with running totals across the bridge.
+**Risk analysis.**
+- Sequencing risk analysis re-orders return histories (worst-first versus best-first) to isolate how much return order, as distinct from return level, affects bridge viability
+- Scenario comparison runs the same household under alternative assumptions, such as no part-time income or full offset drawdown, and sets the results out side by side
+- Bootstrap standard errors use 200 resamples with colour-coded relative SE, so you can tell when a result needs more trials before you trust it
+- Earliest-feasible-retirement-age search: binary-searches over retirement age to find the youngest age that still meets your success threshold
+- Drawdown composition tracking: a per-year breakdown of offset versus non-offset funding and CGT paid, with running totals across the bridge
 
 ---
 
