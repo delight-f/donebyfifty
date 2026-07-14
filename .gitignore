@@ -16,6 +16,11 @@ main.onefile-build/
 .mypy_cache/
 .pytest_cache/
 .ruff_cache/
+.coverage
+htmlcov/
+
+# --- Virtual environment ---
+.venv/
 
 # --- Project-specific ---
 profiles/
@@ -28,6 +33,9 @@ profiles/
 *~
 .DS_Store
 Thumbs.db
+*.docx
 
 # --- Personal ---
+agents.md
 analysis/
+sales.md
