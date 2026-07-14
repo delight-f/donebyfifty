@@ -163,14 +163,6 @@ Household configurations are saved as versioned JSON in a user-configured profil
 
 Default profiles directory: `./profiles/` (gitignored).
 
----
-
-## License
-
-Proprietary. For personal use. Not for redistribution.
-
----
-
 ## Caveats
 
 - **Return assumptions are real, not nominal.** Input your expected real returns accordingly.
