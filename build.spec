@@ -24,6 +24,7 @@ from pathlib import Path
 # ── Project root (resolved from working directory, since spec files are
 #    exec'd without ``__file__`` by PyInstaller's build machinery) ─────
 ROOT = Path().resolve()
+SRC = ROOT / "src" / "donebyfifty"
 
 # ── Block modules not needed by this app ───────────────────────────────
 EXCLUDES = [
@@ -46,8 +47,8 @@ EXCLUDES = [
 block_cipher = None
 
 a = Analysis(
-    ["main.py"],
-    pathex=[],
+    [str(SRC / "main.py")],
+    pathex=[str(SRC)],
     binaries=[],
     datas=[],
     hiddenimports=[

@@ -22,7 +22,8 @@ from models import Profile
 def _profiles_dir() -> Path:
     """Resolve the profiles directory path — always the folder
     containing the actual exe on disk, regardless of build tool
-    or how/where the exe was launched from."""
+    or how/where the exe was launched from.
+    """  # noqa: D205
     if "__compiled__" in globals():
         # Nuitka (onefile or standalone): sys.argv[0] is the real exe path,
         # NOT the temp extraction dir. This is reliable in both modes.

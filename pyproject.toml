@@ -3,6 +3,15 @@ name = "montecarlo-cli"
 version = "0.1.0"
 description = "General-purpose Monte Carlo retirement simulator"
 requires-python = ">=3.11"
+dependencies = [
+    "rich>=13.0",
+]
+
+[project.optional-dependencies]
+build = [
+    "pyinstaller>=6.0",
+    "pyinstaller-hooks-contrib",
+]
 
 [tool.pytest.ini_options]
 markers = [
