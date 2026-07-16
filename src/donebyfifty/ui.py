@@ -688,6 +688,7 @@ def _configure_mortgage(
     vol = None
     kappa = None
     corr = None
+    theta_v = None
     if stoch:
         console.print(
             "  [dim]Enter values in % (e.g. 18 = 18%). Blank = use recommended default.[/]"
