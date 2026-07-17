@@ -1708,6 +1708,12 @@ class RetirementSearchResult:
     earliest_p_success: float
     floor_age: int
     threshold: float
+    mode: str = "both_together"
+    """Search mode: "both_together" or "per_earner"."""
+    target_earner_label: str | None = None
+    """Label of the earner optimised (only set for per_earner mode)."""
+    entered_ages_by_earner: dict[str, int] = field(default_factory=dict)
+    """All earners' current retirement ages at time of search."""
 
 
 def run_retirement_search(
@@ -1717,45 +1723,92 @@ def run_retirement_search(
     n_trials: int = 10_000,
     min_search_age: int = 40,
     success_threshold: float = 0.95,
+    mode: str = "both_together",
+    target_earner_index: int = 0,
 ) -> RetirementSearchResult:
     """Find the earliest retirement age meeting the success threshold.
 
-    Linear scan from the earner's entered retirement age down to
-    ``min_search_age`` (default 40), stopping at the first age where
-    p_success < threshold.
+    Two modes:
 
-    Single-earner only — the function does not check multi-earner.
+    ``"both_together"`` (default): search for the earliest age ALL earners
+    can retire at simultaneously. The search starts from
+    ``max(current retirement ages)`` and scans downward.
+
+    ``"per_earner"``: search for how early a single earner could retire
+    while holding all other earners at their current ages.
 
     Args:
-        household: Household definition (single earner expected).
+        household: Household definition.
         inputs: Base simulation parameters.
         seed: Random seed.
         n_trials: Trials per age search (default 10,000).
         min_search_age: Lowest age to test.
         success_threshold: Minimum acceptable success probability.
+        mode: "both_together" or "per_earner".
+        target_earner_index: Index of earner to optimise (per_earner mode only).
 
     Returns:
-        RetirementSearchResult with entered vs earliest feasible age.
+        ``RetirementSearchResult`` with entered vs earliest feasible age.
 
     """
     from dataclasses import replace as dc_replace
 
-    earner = household.earners[0]
-    entered_age = earner.retirement_age
+    # Common: capture all earners' current ages for display context
+    entered_ages_by_earner = {e.label: e.retirement_age for e in household.earners}
 
-    # Run at entered age
+    if mode == "per_earner":
+        target = household.earners[target_earner_index]
+        entered_age = target.retirement_age
+
+        # Baseline run with all earners at their current ages
+        base_inp = dc_replace(inputs, n_iterations=n_trials)
+        base_result = run_monte_carlo(household, base_inp, seed=seed)
+        entered_p = base_result.p_success
+
+        search_floor = max(min_search_age, inputs.simulation_start_age + 5)
+        earliest = entered_age
+        earliest_p = entered_p
+
+        for test_age in range(entered_age - 1, search_floor - 1, -1):
+            new_earners = list(household.earners)
+            new_earners[target_earner_index] = dc_replace(target, retirement_age=test_age)
+            new_hh = dc_replace(household, earners=tuple(new_earners))
+            new_inp = dc_replace(inputs, household=new_hh, n_iterations=n_trials)
+
+            r = run_monte_carlo(new_hh, new_inp, seed=seed)
+            if r.p_success >= success_threshold:
+                earliest = test_age
+                earliest_p = r.p_success
+            else:
+                break
+
+        return RetirementSearchResult(
+            mode=mode,
+            entered_age=entered_age,
+            entered_p_success=entered_p,
+            earliest_age=earliest,
+            earliest_p_success=earliest_p,
+            target_earner_label=target.label,
+            entered_ages_by_earner=entered_ages_by_earner,
+            floor_age=search_floor,
+            threshold=success_threshold,
+        )
+
+    # both_together mode (default)
+    entered_age = max(e.retirement_age for e in household.earners)
+
+    # Baseline run with all earners at their current ages
     base_inp = dc_replace(inputs, n_iterations=n_trials)
     base_result = run_monte_carlo(household, base_inp, seed=seed)
     entered_p = base_result.p_success
 
-    # Linear scan downward
     search_floor = max(min_search_age, inputs.simulation_start_age + 5)
     earliest = entered_age
     earliest_p = entered_p
 
     for test_age in range(entered_age - 1, search_floor - 1, -1):
-        new_earner = dc_replace(earner, retirement_age=test_age)
-        new_hh = dc_replace(household, earners=(new_earner,))
+        new_earners = tuple(dc_replace(e, retirement_age=test_age) for e in household.earners)
+        new_hh = dc_replace(household, earners=new_earners)
         new_inp = dc_replace(inputs, household=new_hh, n_iterations=n_trials)
 
         r = run_monte_carlo(new_hh, new_inp, seed=seed)
@@ -1763,14 +1816,15 @@ def run_retirement_search(
             earliest = test_age
             earliest_p = r.p_success
         else:
-            # First age below threshold — stop (earlier ages would be worse)
             break
 
     return RetirementSearchResult(
+        mode=mode,
         entered_age=entered_age,
         entered_p_success=entered_p,
         earliest_age=earliest,
         earliest_p_success=earliest_p,
+        entered_ages_by_earner=entered_ages_by_earner,
         floor_age=search_floor,
         threshold=success_threshold,
     )
