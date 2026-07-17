@@ -16,9 +16,11 @@ from models import (
 )
 from primitives import EDU_SCHEDULE_TODAY, EQ_MEAN, SUPER_MEAN
 from simulation import (
+    RetirementSearchResult,
     ScenarioComparisonResult,
     SequencingRiskResult,
     run_monte_carlo,
+    run_retirement_search,
     run_scenario_comparison,
     run_sequencing_analysis,
     run_single_trial,
@@ -790,8 +792,8 @@ class TestOffsetReserveFloor:
             f"no-floor ({res_no_floor.mortgage_term_clearance_rate:.1%})"
         )
         # Print numbers for review
-        print(f"\n  No floor: clearance={res_no_floor.mortgage_term_clearance_rate*100:.1f}%")
-        print(f"  With floor: clearance={res_with_floor.mortgage_term_clearance_rate*100:.1f}%")
+        print(f"\n  No floor: clearance={res_no_floor.mortgage_term_clearance_rate * 100:.1f}%")
+        print(f"  With floor: clearance={res_with_floor.mortgage_term_clearance_rate * 100:.1f}%")
 
 
 class TestMortgageStallCheck:
@@ -933,8 +935,7 @@ class TestOffsetReserveModes:
         rem_no = res_no.remaining_mortgage_p50.get("L", 0)
         rem_stall = res_stall.remaining_mortgage_p50.get("L", 0)
         assert rem_stall < rem_no, (
-            f"Stall-prevention remaining (${rem_stall:,.0f}) should be < "
-            f"no-floor (${rem_no:,.0f})"
+            f"Stall-prevention remaining (${rem_stall:,.0f}) should be < no-floor (${rem_no:,.0f})"
         )
 
     def test_interest_cancelling_preserves_more_than_stall(self) -> None:
@@ -1176,9 +1177,9 @@ class TestSuccessProbabilityDisplay:
         import re
 
         chart_lines = re.findall(r"Success probability: \d+\.\d+%", output)
-        assert (
-            len(chart_lines) == 1
-        ), f"Expected 1 chart line, got {len(chart_lines)}: {chart_lines}"
+        assert len(chart_lines) == 1, (
+            f"Expected 1 chart line, got {len(chart_lines)}: {chart_lines}"
+        )
 
 
 # =============================================================================
@@ -1217,9 +1218,9 @@ class TestRealSalaryGrowth:
         assert source_file is not None
         with open(source_file) as f:
             content = f.read()
-        assert (
-            "(1 + earner.salary_growth_rate) * (1 + inputs.inflation)" in content
-        ), "Salary growth must compound real_rate with inflation."
+        assert "(1 + earner.salary_growth_rate) * (1 + inputs.inflation)" in content, (
+            "Salary growth must compound real_rate with inflation."
+        )
 
 
 # =============================================================================
@@ -1477,12 +1478,12 @@ class TestSequencingAnalysis:
             seed=42,
         )
 
-        assert (
-            seq.worst_first_p_success <= seq.original_p_success
-        ), f"worst={seq.worst_first_p_success:.3f} > original={seq.original_p_success:.3f}"
-        assert (
-            seq.original_p_success <= seq.best_first_p_success
-        ), f"original={seq.original_p_success:.3f} > best={seq.best_first_p_success:.3f}"
+        assert seq.worst_first_p_success <= seq.original_p_success, (
+            f"worst={seq.worst_first_p_success:.3f} > original={seq.original_p_success:.3f}"
+        )
+        assert seq.original_p_success <= seq.best_first_p_success, (
+            f"original={seq.original_p_success:.3f} > best={seq.best_first_p_success:.3f}"
+        )
 
     def test_worst_first_p5_lowest(self) -> None:
         """Worst-first p5 should be the lowest among all orderings."""
@@ -1497,13 +1498,13 @@ class TestSequencingAnalysis:
             seed=42,
         )
 
-        assert (
-            seq.worst_first_p5 <= seq.original_p5
-        ), f"worst p5={seq.worst_first_p5:,.0f} > original p5={seq.original_p5:,.0f}"
+        assert seq.worst_first_p5 <= seq.original_p5, (
+            f"worst p5={seq.worst_first_p5:,.0f} > original p5={seq.original_p5:,.0f}"
+        )
         # Best-first should have highest p5
-        assert (
-            seq.best_first_p5 >= seq.original_p5
-        ), f"best p5={seq.best_first_p5:,.0f} < original p5={seq.original_p5:,.0f}"
+        assert seq.best_first_p5 >= seq.original_p5, (
+            f"best p5={seq.best_first_p5:,.0f} < original p5={seq.original_p5:,.0f}"
+        )
 
     def test_result_fields_present(self) -> None:
         """Sequencing result has all six p_success/p5 fields."""
@@ -1569,9 +1570,9 @@ class TestScenarioComparison:
         )
 
         base = run_monte_carlo(household=h, inputs=inputs, seed=42)
-        assert (
-            scens["No PT income"].p_success <= base.p_success + 0.01
-        ), f"No PT ({scens['No PT income'].p_success:.3f}) > Base ({base.p_success:.3f})"
+        assert scens["No PT income"].p_success <= base.p_success + 0.01, (
+            f"No PT ({scens['No PT income'].p_success:.3f}) > Base ({base.p_success:.3f})"
+        )
 
     def test_results_are_reproducible(self) -> None:
         """Same seed produces identical scenario comparison results."""
@@ -1594,3 +1595,108 @@ class TestScenarioComparison:
         for key in ("No PT income", "Full offset depletion"):
             assert scens1[key].p_success == scens2[key].p_success
             assert scens1[key].bridge_median == scens2[key].bridge_median
+
+
+class TestRetirementSearch:
+    """Tests for run_retirement_search (Work Item 9, multi-earner)."""
+
+    def test_single_earner_backward_compat(self) -> None:
+        """Single-earner household behaves identically to old single-earner path."""
+        h1 = reference_household(retire_age=55)
+        inputs = SimulationInputs(n_iterations=200, cgt_on_drawdowns=True)
+
+        result = run_retirement_search(
+            household=h1,
+            inputs=inputs,
+            seed=42,
+            n_trials=200,
+            min_search_age=45,
+            success_threshold=0.95,
+        )
+
+        assert isinstance(result, RetirementSearchResult)
+        assert result.mode == "both_together"
+        assert result.entered_age == 55
+        assert 0.0 <= result.entered_p_success <= 1.0
+        assert result.earliest_age <= result.entered_age
+        assert len(result.entered_ages_by_earner) == 2  # reference_household has 2
+        assert result.floor_age >= 45
+
+    def test_both_together_lower_ages(self) -> None:
+        """both_together mode: earliest_age <= entered_age and trend is monotonic."""
+        h = reference_household(retire_age=55)
+        inputs = SimulationInputs(n_iterations=200, cgt_on_drawdowns=True)
+
+        result = run_retirement_search(
+            household=h,
+            inputs=inputs,
+            seed=42,
+            n_trials=200,
+            min_search_age=45,
+            success_threshold=0.95,
+            mode="both_together",
+        )
+
+        assert result.mode == "both_together"
+        assert result.earliest_age <= result.entered_age
+        assert result.target_earner_label is None  # not set in both_together mode
+        # Both earners' ages should be in entered_ages_by_earner
+        assert "Earner 1" in result.entered_ages_by_earner
+        assert "Earner 2" in result.entered_ages_by_earner
+
+    def test_per_earner_mode(self) -> None:
+        """per_earner mode: searches the target earner only; others held fixed."""
+        h = reference_household(retire_age=55)
+        inputs = SimulationInputs(n_iterations=200, cgt_on_drawdowns=True)
+
+        result = run_retirement_search(
+            household=h,
+            inputs=inputs,
+            seed=42,
+            n_trials=200,
+            min_search_age=45,
+            success_threshold=0.95,
+            mode="per_earner",
+            target_earner_index=0,
+        )
+
+        assert result.mode == "per_earner"
+        assert result.target_earner_label == "Earner 1"
+        assert result.earliest_age <= result.entered_age
+        assert "Earner 1" in result.entered_ages_by_earner
+        assert "Earner 2" in result.entered_ages_by_earner
+
+    def test_per_earner_targets_second_earner(self) -> None:
+        """per_earner mode: target_earner_index=1 searches Earner 2."""
+        h = reference_household(retire_age=55)
+        inputs = SimulationInputs(n_iterations=200, cgt_on_drawdowns=True)
+
+        result = run_retirement_search(
+            household=h,
+            inputs=inputs,
+            seed=42,
+            n_trials=200,
+            min_search_age=45,
+            success_threshold=0.95,
+            mode="per_earner",
+            target_earner_index=1,
+        )
+
+        assert result.target_earner_label == "Earner 2"
+        assert result.earliest_age <= result.entered_age
+
+    def test_entered_ages_by_earner_preserved(self) -> None:
+        """entered_ages_by_earner contains all earners' current retirement ages."""
+        h = reference_household(retire_age=55)
+        inputs = SimulationInputs(n_iterations=200, cgt_on_drawdowns=True)
+
+        result = run_retirement_search(
+            household=h,
+            inputs=inputs,
+            seed=42,
+            n_trials=200,
+            mode="both_together",
+        )
+
+        assert result.entered_ages_by_earner["Earner 1"] == 55
+        assert result.entered_ages_by_earner["Earner 2"] == 55

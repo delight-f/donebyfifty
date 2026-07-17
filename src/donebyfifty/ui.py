@@ -46,6 +46,7 @@ from rich.panel import Panel
 from rich.prompt import Prompt
 from rich.table import Table
 from rich.text import Text
+from simulation import RetirementSearchResult
 
 # =============================================================================
 # CONSOLE
@@ -1868,7 +1869,7 @@ def show_results_menu(session: ResultsSession) -> None:
             ("6", "Scenario comparison [dim](opt-in, ~1 min)[/]"),
             (
                 "7",
-                "Earliest feasible retirement age [dim](opt-in, ~2 min, single-earner only)[/]",
+                "Earliest feasible retirement age [dim](opt-in, ~2 min)[/]",
             ),
             ("8", "Mortgage amortisation schedule"),
         ]
@@ -2257,35 +2258,120 @@ def _view_scenario_comparison(session: ResultsSession) -> None:
 
 
 def _view_retirement_search(session: ResultsSession) -> None:
-    """Display earliest feasible retirement age (Work Item 9, opt-in, expensive)."""
+    """Display earliest feasible retirement age (Work Item 9, opt-in, expensive).
+
+    Single-earner: runs both_together automatically.
+    Multi-earner: prompts for mode choice (both_together vs per_earner).
+    """
     from simulation import run_retirement_search
 
-    if session.retirement_search is not None:
-        rs = session.retirement_search
-    else:
-        # Single-earner check
-        if len(session.household.earners) > 1:
-            console.print(
-                f"  [bold {THEME_COLOR_ERROR}]Earliest-retirement search is only available"
-                f" for single-earner households.[/]"
+    earners = session.household.earners
+
+    # ── Single earner: same as before, no mode choice needed ──────────
+    if len(earners) == 1:
+        rs = session.retirement_search_all
+        if rs is None or rs.mode != "both_together":
+            if not _prompt_yn(
+                "Search for earliest feasible retirement age? This will run "
+                "several full simulations and may take 2-3 minutes.",
+                default=False,
+            ):
+                return
+            console.print("  [dim]Searching for earliest feasible retirement age...[/]")
+            rs = run_retirement_search(
+                household=session.household,
+                inputs=session.inputs,
+                seed=session.inputs.seed,
             )
-            return
+            session.retirement_search_all = rs
 
-        if not _prompt_yn(
-            "Search for earliest feasible retirement age? This will run "
-            "several full simulations and may take 2-3 minutes.",
-            default=False,
-        ):
-            return
+        _display_retirement_search_result(rs)
+        return
 
-        console.print("  [dim]Searching for earliest feasible retirement age...[/]")
-        rs = run_retirement_search(
-            household=session.household,
-            inputs=session.inputs,
-            seed=session.inputs.seed,
-        )
-        session.retirement_search = rs
+    # ── Multi-earner: prompt for mode ─────────────────────────────────
+    mode_names = {
+        "both_together": "Both/all retire at same earliest age",
+        "per_earner": "Pick one earner to optimise (others fixed)",
+    }
+    while True:
+        console.print()
+        console.print(f"  [{THEME_COLOR_BRIGHT}]Earliest-retirement search mode:[/]")
+        console.print(f"    [{THEME_COLOR}]1.[/] {mode_names['both_together']}")
+        console.print(f"    [{THEME_COLOR}]2.[/] {mode_names['per_earner']}")
 
+        mode_choice = _prompt_int("  Choice", default=1, lo=1, hi=2)
+        mode = "both_together" if mode_choice == 1 else "per_earner"
+
+        # ── Both together ─────────────────────────────────────────────
+        if mode == "both_together":
+            rs = session.retirement_search_all
+            if rs is None or rs.mode != "both_together":
+                if not _prompt_yn(
+                    "Search for earliest age BOTH earners can retire? "
+                    "This will run several full simulations and may take 2-3 minutes.",
+                    default=False,
+                ):
+                    break
+                console.print("  [dim]Searching for earliest retirement age (both together)...[/]")
+                rs = run_retirement_search(
+                    household=session.household,
+                    inputs=session.inputs,
+                    seed=session.inputs.seed,
+                    mode="both_together",
+                )
+                session.retirement_search_all = rs
+
+            _display_retirement_search_result(rs)
+            break
+
+        # ── Per-earner ────────────────────────────────────────────────
+        console.print()
+        console.print(f"  [{THEME_COLOR_BRIGHT}]Which earner to optimise?[/]")
+        for i, e in enumerate(earners):
+            console.print(
+                f"    [{THEME_COLOR}]{i + 1}.[/] {e.label}"
+                f" (currently retires at {e.retirement_age})"
+            )
+        earner_choice = _prompt_int("  Choice", default=1, lo=1, hi=len(earners))
+        target_idx = earner_choice - 1
+        target_label = earners[target_idx].label
+
+        # Check cache
+        rs = session.retirement_search_per_earner.get(target_label)
+        if rs is not None and rs.mode == "per_earner":
+            pass  # use cached
+        else:
+            fixed_info = [
+                f"{e.label} at {e.retirement_age}" for i, e in enumerate(earners) if i != target_idx
+            ]
+            console.print(f"  [dim]Searching for earliest retirement age for {target_label}...[/]")
+            console.print(f"  [dim]Others held fixed: {', '.join(fixed_info)}.[/]")
+            if not _prompt_yn(
+                "Run search? This will run several full simulations and may take 2-3 minutes.",
+                default=False,
+            ):
+                break
+
+            console.print(
+                f"  [dim]Searching for earliest feasible retirement age ({target_label})...[/]"
+            )
+            rs = run_retirement_search(
+                household=session.household,
+                inputs=session.inputs,
+                seed=session.inputs.seed,
+                mode="per_earner",
+                target_earner_index=target_idx,
+            )
+            session.retirement_search_per_earner[target_label] = rs
+
+        _display_retirement_search_result(rs)
+        # Option to run per-earner for another earner
+        if not _prompt_yn("Search for another earner?", default=False):
+            break
+
+
+def _display_retirement_search_result(rs: RetirementSearchResult) -> None:
+    """Display a ``RetirementSearchResult`` with context."""
     console.print()
     console.print(
         Panel(
@@ -2293,15 +2379,36 @@ def _view_retirement_search(session: ResultsSession) -> None:
             border_style=THEME_COLOR_ACCENT,
         )
     )
-    console.print(
-        f"  Your entered retirement age: {rs.entered_age}"
-        f" ({rs.entered_p_success * 100:.2f}% success)"
-    )
+
+    # Show search-mode context
+    if rs.mode == "per_earner" and rs.target_earner_label:
+        fixed_parts = [
+            f"{label} at {age}"
+            for label, age in rs.entered_ages_by_earner.items()
+            if label != rs.target_earner_label
+        ]
+        console.print(f"  Searched: [bold]{rs.target_earner_label}[/] (others held fixed)")
+        if fixed_parts:
+            console.print(f"  Fixed: {'; '.join(fixed_parts)}")
+        console.print(
+            f"  Entered retirement age: {rs.entered_age}"
+            f" ({rs.entered_p_success * 100:.2f}% success)"
+        )
+    else:
+        # both_together or single earner
+        if len(rs.entered_ages_by_earner) > 1:
+            age_parts = [f"{label}: {age}" for label, age in rs.entered_ages_by_earner.items()]
+            console.print(f"  Current retirement ages: {'; '.join(age_parts)}")
+        console.print(
+            f"  Your entered retirement age: {rs.entered_age}"
+            f" ({rs.entered_p_success * 100:.2f}% success)"
+        )
 
     if rs.earliest_age < rs.entered_age:
         console.print(
             f"  Earliest age with \u2265{rs.threshold * 100:.0f}% success:"
-            f" [bold]{rs.earliest_age}[/] ({rs.earliest_p_success * 100:.2f}% success)"
+            f" [bold]{rs.earliest_age}[/]"
+            f" ({rs.earliest_p_success * 100:.2f}% success)"
         )
         console.print(
             f"  Age {rs.earliest_age - 1} or earlier falls below"

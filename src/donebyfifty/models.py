@@ -790,7 +790,10 @@ class ResultsSession:
     sequencing: Any | None = None
 
     # Work Item 9 — Earliest retirement search (populated on demand)
-    retirement_search: Any | None = None
+    retirement_search_all: Any | None = None
+    """Cached result for 'both together' mode."""
+    retirement_search_per_earner: dict[str, Any] = field(default_factory=dict)
+    """Cached results for 'per earner' mode, keyed by earner label."""
 
 
 @dataclass

@@ -1,6 +1,6 @@
 [project]
 name = "montecarlo-cli"
-version = "0.1.2"
+version = "0.2.0"
 description = "General-purpose Monte Carlo retirement simulator"
 requires-python = ">=3.11"
 dependencies = [
@@ -14,6 +14,7 @@ build = [
 ]
 
 [tool.pytest.ini_options]
+pythonpath = ["src"]
 markers = [
     "slow: marks tests as slow (deselect with '-k \"not slow\"')",
 ]
