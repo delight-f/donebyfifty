@@ -295,10 +295,7 @@ def _configure_earner(
         f"\n    [{THEME_COLOR}]4.[/] Not employed"
     )
     emp_choice = _prompt_int("  Choice", default=emp_default_num, lo=1, hi=4)
-    emp_type = {1: "employed", 2: "self_employed", 3: "both", 4: "not_employed"}[
-        emp_choice
-    ]
-    employed = emp_type == "employed"
+    emp_type = {1: "employed", 2: "self_employed", 3: "both", 4: "not_employed"}[emp_choice]
 
     if emp_type == "self_employed":
         console.print(
@@ -310,9 +307,7 @@ def _configure_earner(
     birth_year = None
     if _prompt_yn(
         "  Auto-calculate super access age from birth year?",
-        default=defaults is not None
-        and defaults.birth_year is not None
-        or defaults is None,
+        default=defaults is not None and defaults.birth_year is not None or defaults is None,
     ):
         from models import preservation_age as _preservation_age
 
@@ -332,9 +327,7 @@ def _configure_earner(
         )
 
     if emp_type in ("employed", "self_employed", "both"):
-        salary = _prompt_float(
-            "  Gross annual salary [$]", d.salary, lo=0, hi=5_000_000
-        )
+        salary = _prompt_float("  Gross annual salary [$]", d.salary, lo=0, hi=5_000_000)
         sal_growth = _prompt_float(
             "  Real salary growth rate [%] (above inflation)",
             d.salary_growth_rate * 100,
@@ -474,9 +467,7 @@ def _configure_earner(
     pt_rate_mode = "daily_rate"
     pt_daily_rate = 3_000.0
     pt_salary_pct = 0.0
-    has_pt = _prompt_yn(
-        "  Part-time work after retirement?", default=d.pt_days_per_week > 0
-    )
+    has_pt = _prompt_yn("  Part-time work after retirement?", default=d.pt_days_per_week > 0)
     if has_pt:
         pt_days = _prompt_float(
             "  Days per week",
@@ -484,7 +475,11 @@ def _configure_earner(
             lo=0.5,
             hi=7,
         )
-        default_start = retire_age if employed and retire_age < 999 else 60
+        default_start = (
+            retire_age
+            if emp_type in ("employed", "self_employed", "both") and retire_age < 999
+            else 60
+        )
         pt_start = _prompt_int("  Start age", default_start, lo=30, hi=75)
         pt_end = _prompt_int(
             "  End age",
@@ -497,9 +492,7 @@ def _configure_earner(
             "  Calculate income as",
             choices=["daily_rate", "salary_pct"],
             default=(
-                d.pt_rate_mode
-                if d.pt_rate_mode in ("daily_rate", "salary_pct")
-                else "daily_rate"
+                d.pt_rate_mode if d.pt_rate_mode in ("daily_rate", "salary_pct") else "daily_rate"
             ),
         )
         pt_rate_mode = rate_mode_raw.strip()
@@ -522,8 +515,7 @@ def _configure_earner(
             pt_start,
             (
                 retire_age
-                if emp_type in ("employed", "self_employed", "both")
-                and retire_age < 999
+                if emp_type in ("employed", "self_employed", "both") and retire_age < 999
                 else start_age
             ),
         )
@@ -580,18 +572,14 @@ def _configure_child(label: str, defaults: Child | None = None) -> Child:
         edu_default = 1  # default to "use default schedule"
 
     console.print(f"  [{THEME_COLOR_BRIGHT}]Education costs:[/]")
-    console.print(
-        f"    [{THEME_COLOR}]1. Use default schedule (~$292k total, age 0-17)[/]"
-    )
+    console.print(f"    [{THEME_COLOR}]1. Use default schedule (~$292k total, age 0-17)[/]")
     console.print(f"    [{THEME_COLOR}]2. Enter custom costs manually[/]")
     console.print(f"    [{THEME_COLOR}]3. No education costs[/]")
     edu_choice = _prompt_int("  Choice", default=edu_default, lo=1, hi=3)
 
     schedule: tuple[tuple[int, float], ...] = ()
     if edu_choice == 2:
-        console.print(
-            "  Enter (age, cost) pairs. Press Enter on a blank Age to finish."
-        )
+        console.print("  Enter (age, cost) pairs. Press Enter on a blank Age to finish.")
         pairs: list[tuple[int, float]] = []
         while True:
             age_raw = Prompt.ask(
@@ -618,9 +606,7 @@ def _configure_child(label: str, defaults: Child | None = None) -> Child:
     return Child(label=label, age=age, education_schedule=schedule)
 
 
-def _configure_mortgage(
-    label: str, defaults: MortgageAccount | None = None
-) -> MortgageAccount:
+def _configure_mortgage(label: str, defaults: MortgageAccount | None = None) -> MortgageAccount:
     """Prompt for one mortgage's details."""
     d = defaults or MortgageAccount(label=label)
     console.print(f"\n[bold {THEME_COLOR_ACCENT}]  --- {label} ---[/]")
@@ -628,9 +614,7 @@ def _configure_mortgage(
         "  Remaining balance (outstanding) [$]", d.principal, lo=0, hi=10_000_000
     )
     rate = _prompt_float("  Interest rate [%]", d.interest_rate * 100, lo=0, hi=15)
-    pmt = _prompt_float(
-        "  Monthly payment [$] (0=interest-only)", d.monthly_payment, lo=0
-    )
+    pmt = _prompt_float("  Monthly payment [$] (0=interest-only)", d.monthly_payment, lo=0)
     if pmt > 0 and pmt * 12 < principal * (rate / 100):
         console.print(
             f"  [bold {THEME_COLOR_WARN}]\u26a0\ufe0f  Monthly payment is less than the interest"
@@ -770,17 +754,13 @@ def _configure_account(
     """Prompt for one investment account's details."""
     d = defaults or InvestmentAccount(label=label)
     console.print(f"\n[bold {THEME_COLOR_ACCENT}]  --- {label} ---[/]")
-    value = _prompt_float(
-        "  Current market value [$]", d.market_value, lo=0, hi=10_000_000
-    )
+    value = _prompt_float("  Current market value [$]", d.market_value, lo=0, hi=10_000_000)
     is_offset = _prompt_yn("  Is this a mortgage offset account?", d.is_offset)
 
     # Only ask for cost basis if NOT an offset account (no CGT on offsets)
     basis = 0.0
     if not is_offset:
-        basis = _prompt_float(
-            "  Original purchase value [$]", d.cost_basis, lo=0, hi=10_000_000
-        )
+        basis = _prompt_float("  Original purchase value [$]", d.cost_basis, lo=0, hi=10_000_000)
 
     asset_class = "cash" if is_offset else "equity"
     # Only ask for asset class and return rate if not an offset account
@@ -868,13 +848,9 @@ def _configure_earners_section(
     earners: list[Earner] = []
     for i in range(num_earners):
         label = f"Earner {i + 1}"
-        existing_e = (
-            existing.earners[i] if existing and i < len(existing.earners) else None
-        )
+        existing_e = existing.earners[i] if existing and i < len(existing.earners) else None
         if preset == "single_income" and i == 1:
-            existing_e = existing_e or Earner(
-                label=label, salary=0, employment_type="not_employed"
-            )
+            existing_e = existing_e or Earner(label=label, salary=0, employment_type="not_employed")
             e = _configure_earner(label, existing_e, start_age)
             e = Earner(
                 label=e.label,
@@ -919,11 +895,7 @@ def _configure_mortgages_section(
         )
         for i in range(num_m):
             label = f"Mortgage {i + 1}"
-            existing_m = (
-                existing.mortgages[i]
-                if existing and i < len(existing.mortgages)
-                else None
-            )
+            existing_m = existing.mortgages[i] if existing and i < len(existing.mortgages) else None
             mortgages.append(_configure_mortgage(label, existing_m))
     return tuple(mortgages)
 
@@ -935,8 +907,7 @@ def _configure_children_section(
     """Configure all children, reusing existing values as defaults."""
     children: list[Child] = []
     has_kids = preset == "family" or (
-        preset == "custom"
-        and _prompt_yn("Any children?", bool(existing and existing.children))
+        preset == "custom" and _prompt_yn("Any children?", bool(existing and existing.children))
     )
     if has_kids or (existing and existing.children):
         num_kids = _prompt_int(
@@ -947,11 +918,7 @@ def _configure_children_section(
         )
         for i in range(num_kids):
             label = f"Child {i + 1}"
-            existing_c = (
-                existing.children[i]
-                if existing and i < len(existing.children)
-                else None
-            )
+            existing_c = existing.children[i] if existing and i < len(existing.children) else None
             children.append(_configure_child(label, existing_c))
     return tuple(children)
 
@@ -963,9 +930,7 @@ def _configure_accounts_section(
     # Determine earner count and labels for ownership split prompt
     n_earners = len(existing.earners) if existing and existing.earners else 1
     earner_labels = (
-        [e.label for e in existing.earners]
-        if existing and existing.earners
-        else ["Earner 1"]
+        [e.label for e in existing.earners] if existing and existing.earners else ["Earner 1"]
     )
 
     accounts: list[InvestmentAccount] = []
@@ -975,9 +940,7 @@ def _configure_accounts_section(
     if has_accounts or (existing and existing.investment_accounts):
         num_a = _prompt_int(
             "How many accounts?",
-            len(existing.investment_accounts)
-            if existing and existing.investment_accounts
-            else 1,
+            len(existing.investment_accounts) if existing and existing.investment_accounts else 1,
             lo=0,
             hi=10,
         )
@@ -1151,18 +1114,14 @@ def edit_household(
             earners = list(
                 _configure_earners_section(
                     "custom",
-                    _make_dummy_household(
-                        earners, mortgages, children, accounts, living, target
-                    ),
+                    _make_dummy_household(earners, mortgages, children, accounts, living, target),
                     start_age,
                 )
             )
         elif choice == 2:
             mortgages = list(
                 _configure_mortgages_section(
-                    _make_dummy_household(
-                        earners, mortgages, children, accounts, living, target
-                    )
+                    _make_dummy_household(earners, mortgages, children, accounts, living, target)
                 )
             )
             # Re-link offset accounts after mortgage changes (silent if only one mortgage)
@@ -1171,25 +1130,19 @@ def edit_household(
             children = list(
                 _configure_children_section(
                     "custom",
-                    _make_dummy_household(
-                        earners, mortgages, children, accounts, living, target
-                    ),
+                    _make_dummy_household(earners, mortgages, children, accounts, living, target),
                 )
             )
         elif choice == 4:
             accounts = list(
                 _configure_accounts_section(
-                    _make_dummy_household(
-                        earners, mortgages, children, accounts, living, target
-                    )
+                    _make_dummy_household(earners, mortgages, children, accounts, living, target)
                 )
             )
             mortgages = _link_offsets_to_mortgages(accounts, mortgages)
         elif choice == 5:
             living, target = _configure_expenses_section(
-                _make_dummy_household(
-                    earners, mortgages, children, accounts, living, target
-                )
+                _make_dummy_household(earners, mortgages, children, accounts, living, target)
             )
         else:
             break
@@ -1367,9 +1320,7 @@ def display_results(
             f" bridge (earlier super access age / later retirement).[/]"
         )
         if results.bridge_median < 0:
-            console.print(
-                f"  [dim]Median shortfall: {_fmt_dollar(abs(results.bridge_median))}[/]"
-            )
+            console.print(f"  [dim]Median shortfall: {_fmt_dollar(abs(results.bridge_median))}[/]")
     elif results.p_success < 0.30:
         console.print(
             f"  ⚠️  [bold {THEME_COLOR_ERROR}]Severe risk: success in only {results.p_success * 100:.2f}% of trials."
@@ -1524,16 +1475,12 @@ def display_results(
             if tc_rate < 0.5
             else THEME_COLOR_WARN
         )
-        console.print(
-            f"  Mortgage term clearance: [bold {tc_color}]{tc_rate * 100:.1f}%[/]"
-        )
+        console.print(f"  Mortgage term clearance: [bold {tc_color}]{tc_rate * 100:.1f}%[/]")
         if tc_rate < 1.0:
             if results.per_mortgage_term_cleared_pct:
                 for label, pct in results.per_mortgage_term_cleared_pct.items():
                     if pct < 1.0:
-                        console.print(
-                            f"    [dim]{label}: cleared in {pct * 100:.1f}% of paths[/]"
-                        )
+                        console.print(f"    [dim]{label}: cleared in {pct * 100:.1f}% of paths[/]")
             console.print(
                 "  [dim]A mortgage not cleared by term end may force"
                 " refinancing, asset sales, or reduced living standards.[/]"
@@ -1553,9 +1500,7 @@ def display_results(
         and any(v > 0 for v in results.remaining_mortgage_p50.values())
         and not results.per_mortgage_term_cleared_pct
     ):
-        console.print(
-            "  [dim]Mortgage term clearance: no term-end check was configured.[/]"
-        )
+        console.print("  [dim]Mortgage term clearance: no term-end check was configured.[/]")
 
     # ── Super and Tax Warnings ─────────────────────────────────────────
     if household:
@@ -1585,14 +1530,8 @@ def display_results(
             sigma_mod = BK_SIGMA_MODERATE
             sigma_str = BK_SIGMA_STRESS
             rho = BK_RHO
-            lo = (
-                math.exp(math.log(theta) - 1.96 * sigma_mod / math.sqrt(2 * kappa))
-                * 100
-            )
-            hi = (
-                math.exp(math.log(theta) + 1.96 * sigma_mod / math.sqrt(2 * kappa))
-                * 100
-            )
+            lo = math.exp(math.log(theta) - 1.96 * sigma_mod / math.sqrt(2 * kappa)) * 100
+            hi = math.exp(math.log(theta) + 1.96 * sigma_mod / math.sqrt(2 * kappa)) * 100
             disclosures.append(
                 f"Mortgage interest rates follow a Black-Karasinski "
                 f"mean-reverting lognormal process (discrete AR(1), "
@@ -1701,9 +1640,7 @@ def _super_warning_messages(
             f"Excess may be subject to excess contributions tax.[/]"
         )
 
-    indexed_div293_threshold = (
-        DIV293_THRESHOLD * (1 + DEFAULT_DIV293_GROWTH_RATE) ** years
-    )
+    indexed_div293_threshold = DIV293_THRESHOLD * (1 + DEFAULT_DIV293_GROWTH_RATE) ** years
     if indexed_salary > indexed_div293_threshold and sg_contribution > 0:
         warnings.append(
             f"  ⚠️  [bold {THEME_COLOR_WARN}]Division 293 applies for {earner_label} "
@@ -1761,13 +1698,9 @@ def review_before_run(
 
     """
     bridge_end = min(e.super_access_age for e in household.earners)
-    employed_retirements = [
-        e.retirement_age for e in household.earners if e.retirement_age < 999
-    ]
+    employed_retirements = [e.retirement_age for e in household.earners if e.retirement_age < 999]
     bridge_start = (
-        min(employed_retirements)
-        if employed_retirements
-        else sim_inputs.simulation_start_age
+        min(employed_retirements) if employed_retirements else sim_inputs.simulation_start_age
     )
     bridge_years = bridge_end - bridge_start
 
@@ -1786,11 +1719,15 @@ def review_before_run(
         emp = emp_labels.get(e.employment_type, "Employed")
         pt_info = ""
         if e.pt_days_per_week > 0:
-            pt_info = (
-                f", PT {e.pt_days_per_week:.1f}d/wk ({e.pt_start_age}–{e.pt_end_age})"
-            )
+            pt_info = f", PT {e.pt_days_per_week:.1f}d/wk ({e.pt_start_age}–{e.pt_end_age})"
+        income_parts = [f"salary ${e.salary:,.0f}"]
+        if e.employment_type == "both" and e.self_employed_income > 0:
+            income_parts.append(f"self-employed ${e.self_employed_income:,.0f}")
+        elif e.employment_type == "self_employed":
+            income_parts = [f"self-employed ${e.salary:,.0f}"]
+        income_str = " + ".join(income_parts)
         hh_lines.append(
-            f"  {e.label}: {emp}, salary ${e.salary:,.0f}, "
+            f"  {e.label}: {emp}, {income_str}, "
             f"retire at {e.retirement_age}, super access at {e.super_access_age}"
             f"{pt_info}"
         )
@@ -1802,18 +1739,14 @@ def review_before_run(
     if household.mortgages:
         hh_lines.append(f"[bold]Mortgages ({household.num_mortgages}):[/]")
         for m in household.mortgages:
-            stoch_tag = (
-                " [dim](stochastic rates)[/dim]" if m.interest_rate_stochastic else ""
-            )
+            stoch_tag = " [dim](stochastic rates)[/dim]" if m.interest_rate_stochastic else ""
             hh_lines.append(
                 f"  {m.label}: ${m.principal:,.0f} at {m.interest_rate * 100:.2f}%"
                 f"{stoch_tag}, "
                 f"${m.monthly_payment:,.0f}/month"
             )
     if household.investment_accounts:
-        hh_lines.append(
-            f"[bold]Investment accounts ({len(household.investment_accounts)}):[/]"
-        )
+        hh_lines.append(f"[bold]Investment accounts ({len(household.investment_accounts)}):[/]")
         for a in household.investment_accounts:
             tag = " (offset)" if a.is_offset else ""
             # Show ownership split for multi-earner, non-offset accounts
@@ -1821,9 +1754,7 @@ def review_before_run(
             if len(household.earners) > 1 and not a.is_offset and len(a.ownership) > 1:
                 for ei, share in sorted(a.ownership.items()):
                     if share > 0 and ei < len(household.earners):
-                        owner_parts.append(
-                            f"{household.earners[ei].label} {share * 100:.0f}%"
-                        )
+                        owner_parts.append(f"{household.earners[ei].label} {share * 100:.0f}%")
             owner_str = f" — {' / '.join(owner_parts)}" if owner_parts else ""
             hh_lines.append(f"  {a.label}: ${a.market_value:,.0f}{tag}{owner_str}")
     hh_lines.append(
@@ -1922,11 +1853,7 @@ def show_results_menu(session: ResultsSession) -> None:
             Panel(
                 f"Simulation complete \u2014 {session.results.trials:,} trials\n"
                 f"Success: {session.results.p_success * 100:.2f}%"
-                + (
-                    f"\nSeed: {session.inputs.seed}"
-                    if session.inputs.seed is not None
-                    else ""
-                ),
+                + (f"\nSeed: {session.inputs.seed}" if session.inputs.seed is not None else ""),
                 border_style=THEME_COLOR_ACCENT,
             )
         )
@@ -2019,36 +1946,20 @@ def _view_trajectory(session: ResultsSession) -> None:
     for i, age in enumerate(ages):
         table.add_row(
             str(age),
-            _fmt_dollar(r.bridge_by_age_p5[i])
-            if i < len(r.bridge_by_age_p5)
-            else "\u2014",
-            _fmt_dollar(r.bridge_by_age_p10[i])
-            if i < len(r.bridge_by_age_p10)
-            else "\u2014",
-            _fmt_dollar(r.bridge_by_age_p25[i])
-            if i < len(r.bridge_by_age_p25)
-            else "\u2014",
-            _fmt_dollar(r.bridge_by_age_p50[i])
-            if i < len(r.bridge_by_age_p50)
-            else "\u2014",
-            _fmt_dollar(r.bridge_by_age_p75[i])
-            if i < len(r.bridge_by_age_p75)
-            else "\u2014",
-            _fmt_dollar(r.bridge_by_age_p90[i])
-            if i < len(r.bridge_by_age_p90)
-            else "\u2014",
-            _fmt_dollar(r.bridge_by_age_p95[i])
-            if i < len(r.bridge_by_age_p95)
-            else "\u2014",
+            _fmt_dollar(r.bridge_by_age_p5[i]) if i < len(r.bridge_by_age_p5) else "\u2014",
+            _fmt_dollar(r.bridge_by_age_p10[i]) if i < len(r.bridge_by_age_p10) else "\u2014",
+            _fmt_dollar(r.bridge_by_age_p25[i]) if i < len(r.bridge_by_age_p25) else "\u2014",
+            _fmt_dollar(r.bridge_by_age_p50[i]) if i < len(r.bridge_by_age_p50) else "\u2014",
+            _fmt_dollar(r.bridge_by_age_p75[i]) if i < len(r.bridge_by_age_p75) else "\u2014",
+            _fmt_dollar(r.bridge_by_age_p90[i]) if i < len(r.bridge_by_age_p90) else "\u2014",
+            _fmt_dollar(r.bridge_by_age_p95[i]) if i < len(r.bridge_by_age_p95) else "\u2014",
         )
 
     console.print(table)
 
     # Export hint
     console.print()
-    console.print(
-        "  [dim]Copy this table for Excel: select and copy the terminal output.[/]"
-    )
+    console.print("  [dim]Copy this table for Excel: select and copy the terminal output.[/]")
 
 
 def _view_near_miss(session: ResultsSession) -> None:
@@ -2065,17 +1976,13 @@ def _view_near_miss(session: ResultsSession) -> None:
     console.print(
         f"  [bold]Near-miss analysis[/] (threshold: \u2264 {_fmt_dollar(r.near_miss_threshold)})"
     )
-    console.print(
-        f"  Trials that crossed below threshold: [bold]{near_miss_pct:.2f}%[/]"
-    )
+    console.print(f"  Trials that crossed below threshold: [bold]{near_miss_pct:.2f}%[/]")
 
     # Failure age distribution
     if r.failure_age_distribution:
         total_failures = sum(r.failure_age_distribution.values())
         console.print()
-        console.print(
-            f"  [bold]Failure age distribution:[/] ({total_failures} failing trials)"
-        )
+        console.print(f"  [bold]Failure age distribution:[/] ({total_failures} failing trials)")
 
         table = Table(
             border_style=THEME_COLOR_ACCENT,
@@ -2137,9 +2044,7 @@ def _view_sequencing_risk(session: ResultsSession) -> None:
         f"  Best returns first:       {seq.best_first_p_success * 100:.2f}% success,"
         f"  P5 = {_fmt_dollar(seq.best_first_p5)}"
     )
-    console.print(
-        f"  [bold]Sequencing risk spread:[/] {seq.spread * 100:.2f} percentage points"
-    )
+    console.print(f"  [bold]Sequencing risk spread:[/] {seq.spread * 100:.2f} percentage points")
     console.print()
     console.print("  [dim]What this means:[/]")
     console.print(
@@ -2171,9 +2076,7 @@ def _view_drawdown_composition(session: ResultsSession) -> None:
     ages = r.bridge_by_age_ages
 
     if not r.offset_drawn_p50 or not ages:
-        console.print(
-            f"  [bold {THEME_COLOR_WARN}]No drawdown composition data available.[/]"
-        )
+        console.print(f"  [bold {THEME_COLOR_WARN}]No drawdown composition data available.[/]")
         return
 
     # Compute total (across all years) for summary
@@ -2276,15 +2179,9 @@ def _view_cgt_breakdown(session: ResultsSession) -> None:
     # Summary
     console.print()
     if floor_cost > 0:
-        pct_increase = (
-            (floor_cost / total_without_floor * 100) if total_without_floor > 0 else 0.0
-        )
-        console.print(
-            f"  [bold]Total CGT with 30% floor:[/] {_fmt_dollar(total_with_floor)}"
-        )
-        console.print(
-            f"  [bold]Total CGT without floor:[/] {_fmt_dollar(total_without_floor)}"
-        )
+        pct_increase = (floor_cost / total_without_floor * 100) if total_without_floor > 0 else 0.0
+        console.print(f"  [bold]Total CGT with 30% floor:[/] {_fmt_dollar(total_with_floor)}")
+        console.print(f"  [bold]Total CGT without floor:[/] {_fmt_dollar(total_without_floor)}")
         console.print(
             f"  [bold]Extra CGT from 30% minimum rate:[/] {_fmt_dollar(floor_cost)}"
             f"  ({pct_increase:.1f}% increase)"
@@ -2521,19 +2418,9 @@ def _view_mortgage_amortisation(session: ResultsSession) -> None:
                 _fmt_dollar(bal_p95),
             ]
             if has_rates and ratedata is not None:
-                rp5 = (
-                    _fmt_pct(ratedata["p5"][i]) if i < len(ratedata["p5"]) else "\u2014"
-                )
-                rp50 = (
-                    _fmt_pct(ratedata["p50"][i])
-                    if i < len(ratedata["p50"])
-                    else "\u2014"
-                )
-                rp95 = (
-                    _fmt_pct(ratedata["p95"][i])
-                    if i < len(ratedata["p95"])
-                    else "\u2014"
-                )
+                rp5 = _fmt_pct(ratedata["p5"][i]) if i < len(ratedata["p5"]) else "\u2014"
+                rp50 = _fmt_pct(ratedata["p50"][i]) if i < len(ratedata["p50"]) else "\u2014"
+                rp95 = _fmt_pct(ratedata["p95"][i]) if i < len(ratedata["p95"]) else "\u2014"
                 row.extend([rp5, rp50, rp95])
             if offset_bal is not None:
                 row.append(_fmt_dollar(offset_bal))
