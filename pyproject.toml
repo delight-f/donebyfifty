@@ -1,6 +1,6 @@
 [project]
 name = "montecarlo-cli"
-version = "0.1.1"
+version = "0.1.2"
 description = "General-purpose Monte Carlo retirement simulator"
 requires-python = ">=3.11"
 dependencies = [
