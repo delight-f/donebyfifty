@@ -769,6 +769,7 @@ class TrialResult:
         unmet_spending: float = 0.0,
         term_cleared: list[bool | None] | None = None,
         floor_age: int = 0,
+        first_failure_age: int | None = None,
         # Per-year trajectory data (Work Items 1, 10)
         bridge_by_age: list[float] | None = None,
         mortgage_by_age: list[list[float]] | None = None,
@@ -790,6 +791,7 @@ class TrialResult:
         self.unmet_spending = unmet_spending
         self.term_cleared = list(term_cleared) if term_cleared else []
         self.floor_age = floor_age
+        self.first_failure_age = first_failure_age
         # Per-year trajectory
         self.bridge_by_age = list(bridge_by_age) if bridge_by_age else []
         self.mortgage_by_age = [list(y) for y in (mortgage_by_age or [])]
@@ -860,6 +862,7 @@ def run_single_trial(
 
     min_bridge: float = float("inf")
     floor_age: int = inputs.simulation_start_age
+    first_failure_age: int | None = None
     cumulative_inflation = 1.0
 
     # Per-year trajectory accumulators (Work Items 1, 10)
@@ -952,6 +955,10 @@ def run_single_trial(
             min_bridge = current_bridge
             floor_age = age
 
+        # Track first age bridge goes to zero (Work Item 2)
+        if first_failure_age is None and current_bridge <= 0:
+            first_failure_age = age
+
         # Capture per-year trajectory (Work Items 1, 10)
         bridge_by_age_trial.append(current_bridge)
         mortgage_by_age_trial.append(list(state.mortgage_principals))
@@ -989,6 +996,7 @@ def run_single_trial(
         unmet_spending=state.unmet_spending,
         term_cleared=term_cleared,
         floor_age=floor_age,
+        first_failure_age=first_failure_age,
         # Per-year trajectory (Work Items 1, 10)
         bridge_by_age=bridge_by_age_trial,
         mortgage_by_age=mortgage_by_age_trial,
@@ -1192,8 +1200,8 @@ def run_monte_carlo(
             global_floor_end_bridge = result.bridge
 
         # Collect failure ages for near-miss analysis (Work Item 2)
-        if result.min_bridge <= 0:
-            failure_ages.append(result.floor_age)
+        if result.min_bridge <= 0 and result.first_failure_age is not None:
+            failure_ages.append(result.first_failure_age)
 
     # ── Deflate to today's dollars (real values) ──────────────────────
     # All bridge figures are deflated so the client reads them in today's
@@ -1646,11 +1654,13 @@ def run_scenario_comparison(
     seed: int | None = None,
     n_trials: int = 10_000,
 ) -> dict[str, ScenarioComparisonResult]:
-    """Run alternative scenarios for comparison with the base case.
+    """Run dynamic scenario comparisons against the base case.
 
-    Scenarios configured per firm decision (Work Item 6):
-    - "no_pt": zero out all part-time income
-    - "full_offset_depletion": set all offset_reserve_floor to 0
+    Scenarios are built from the household's actual configuration:
+    - "No PT income": only when at least one earner has PT work
+    - "{label} stops working": one per earner, sets them to not_employed
+    - "Expenses 10% higher": increases both base + target expenses
+    - "Expenses 10% lower": decreases both
 
     Args:
         household: Base household definition.
@@ -1675,20 +1685,48 @@ def run_scenario_comparison(
             bridge_median=r.bridge_median,
         )
 
-    # Scenario 2: No PT income
-    new_earners = tuple(dc_replace(e, pt_days_per_week=0.0) for e in household.earners)
-    hh_no_pt = dc_replace(household, earners=new_earners)
-    inp_no_pt = dc_replace(inputs, household=hh_no_pt, n_iterations=n_trials)
-    _run(hh_no_pt, inp_no_pt, "No PT income")
+    # ── No PT income (only if at least one earner has PT configured) ─
+    if any(e.pt_days_per_week > 0 for e in household.earners):
+        new_earners = tuple(dc_replace(e, pt_days_per_week=0.0) for e in household.earners)
+        hh_no_pt = dc_replace(household, earners=new_earners)
+        inp_no_pt = dc_replace(inputs, household=hh_no_pt, n_iterations=n_trials)
+        _run(hh_no_pt, inp_no_pt, "No PT income")
 
-    # Scenario 3: Full offset depletion (all reserve floors = 0)
-    new_mortgages = tuple(
-        dc_replace(m, offset_reserve_floor=0.0, offset_reserve_mode="fixed")
-        for m in household.mortgages
+    # ── One earner stops working (per earner) ───────────────────────
+    for i, earner in enumerate(household.earners):
+        label = f"{earner.label} stops working"
+        if label in results:
+            continue  # deduplicate labels
+        new_e = dc_replace(
+            earner,
+            salary=0.0,
+            sg_rate=0.0,
+            employment_type="not_employed",
+            self_employed_income=0.0,
+        )
+        new_earners = list(household.earners)
+        new_earners[i] = new_e
+        hh_stop = dc_replace(household, earners=tuple(new_earners))
+        inp_stop = dc_replace(inputs, household=hh_stop, n_iterations=n_trials)
+        _run(hh_stop, inp_stop, label)
+
+    # ── Expenses 10% higher ─────────────────────────────────────────
+    hh_high = dc_replace(
+        household,
+        base_living_expenses=household.base_living_expenses * 1.1,
+        retirement_target=household.retirement_target * 1.1,
     )
-    hh_deplete = dc_replace(household, mortgages=new_mortgages)
-    inp_deplete = dc_replace(inputs, household=hh_deplete, n_iterations=n_trials)
-    _run(hh_deplete, inp_deplete, "Full offset depletion")
+    inp_high = dc_replace(inputs, household=hh_high, n_iterations=n_trials)
+    _run(hh_high, inp_high, "Expenses 10% higher")
+
+    # ── Expenses 10% lower ──────────────────────────────────────────
+    hh_low = dc_replace(
+        household,
+        base_living_expenses=household.base_living_expenses * 0.9,
+        retirement_target=household.retirement_target * 0.9,
+    )
+    inp_low = dc_replace(inputs, household=hh_low, n_iterations=n_trials)
+    _run(hh_low, inp_low, "Expenses 10% lower")
 
     return results
 

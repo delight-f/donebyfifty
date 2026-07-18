@@ -2205,14 +2205,23 @@ def _view_scenario_comparison(session: ResultsSession) -> None:
     if session.scenarios is not None:
         scens = session.scenarios
     else:
+        # Count applicable scenarios dynamically
+        n_scens = 1  # expenses 10% higher
+        n_scens += 1  # expenses 10% lower
+        n_scens += sum(1 for e in session.household.earners)  # stops working
+        if any(e.pt_days_per_week > 0 for e in session.household.earners):
+            n_scens += 1  # no PT income
+
+        est_min = max(1, n_scens // 2)
         if not _prompt_yn(
-            "Run scenario comparison? This will run 2 additional "
-            "simulations and may take 1-2 minutes.",
+            f"Run {n_scens} scenario comparison{'s' if n_scens > 1 else ''}?"
+            f" This will run {n_scens} additional simulations"
+            f" and may take ~{est_min}-{n_scens} minutes.",
             default=False,
         ):
             return
 
-        console.print("  [dim]Running scenario comparison...[/]")
+        console.print(f"  [dim]Running {n_scens} scenario comparisons...[/]")
         scens = run_scenario_comparison(
             household=session.household,
             inputs=session.inputs,

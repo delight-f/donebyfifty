@@ -1528,8 +1528,41 @@ class TestSequencingAnalysis:
 class TestScenarioComparison:
     """Integration tests for run_scenario_comparison (Work Item 6)."""
 
-    def test_both_scenarios_returned(self) -> None:
-        """Scenario comparison returns both 'No PT income' and 'Full offset depletion'."""
+    def test_scenarios_returned(self) -> None:
+        """Dynamic scenarios are returned based on household config."""
+        h = reference_household(retire_age=50)
+        # Add PT to at least one earner so "No PT income" appears
+        earners = list(h.earners)
+        earners[0] = type(earners[0])(
+            **{
+                **vars(earners[0]),
+                "pt_days_per_week": 3.0,
+                "pt_start_age": 50,
+                "pt_end_age": 60,
+                "pt_rate_mode": "daily_rate",
+            }
+        )
+        h = type(h)(**{**vars(h), "earners": tuple(earners)})
+
+        inputs = SimulationInputs(n_iterations=100, cgt_on_drawdowns=True)
+        scens = run_scenario_comparison(
+            household=h,
+            inputs=inputs,
+            seed=42,
+            n_trials=100,
+        )
+
+        # Should have No PT (PT>0 exists) + 2 earners stop + hi/lo expenses = 5
+        assert "No PT income" in scens
+        assert "Earner 1 stops working" in scens
+        assert "Earner 2 stops working" in scens
+        assert "Expenses 10% higher" in scens
+        assert "Expenses 10% lower" in scens
+        assert isinstance(scens["No PT income"], ScenarioComparisonResult)
+        assert isinstance(scens["Expenses 10% higher"], ScenarioComparisonResult)
+
+    def test_no_pt_skipped_when_no_pt_configured(self) -> None:
+        """'No PT income' scenario is omitted when no earner has PT."""
         h = reference_household(retire_age=50)
         inputs = SimulationInputs(n_iterations=100, cgt_on_drawdowns=True)
 
@@ -1540,10 +1573,10 @@ class TestScenarioComparison:
             n_trials=100,
         )
 
-        assert "No PT income" in scens
-        assert "Full offset depletion" in scens
-        assert isinstance(scens["No PT income"], ScenarioComparisonResult)
-        assert isinstance(scens["Full offset depletion"], ScenarioComparisonResult)
+        assert "No PT income" not in scens
+        # Other scenarios should still be present
+        assert "Earner 1 stops working" in scens
+        assert "Expenses 10% higher" in scens
 
     def test_no_pt_reduces_success(self) -> None:
         """Removing PT income should not increase success probability."""
@@ -1574,6 +1607,60 @@ class TestScenarioComparison:
             f"No PT ({scens['No PT income'].p_success:.3f}) > Base ({base.p_success:.3f})"
         )
 
+    def test_earner_stops_working_lowers_success(self) -> None:
+        """An earner stopping work should not increase success."""
+        h = reference_household(retire_age=50)
+        inputs = SimulationInputs(n_iterations=100, cgt_on_drawdowns=True)
+
+        base = run_monte_carlo(household=h, inputs=inputs, seed=42)
+        scens = run_scenario_comparison(
+            household=h,
+            inputs=inputs,
+            seed=42,
+            n_trials=100,
+        )
+
+        for label in ("Earner 1 stops working", "Earner 2 stops working"):
+            assert scens[label].p_success <= base.p_success + 0.01, (
+                f"{label} ({scens[label].p_success:.3f}) > Base ({base.p_success:.3f})"
+            )
+
+    def test_expenses_higher_lowers_success(self) -> None:
+        """Higher expenses should not increase success probability."""
+        h = reference_household(retire_age=50)
+        inputs = SimulationInputs(n_iterations=100, cgt_on_drawdowns=True)
+
+        base = run_monte_carlo(household=h, inputs=inputs, seed=42)
+        scens = run_scenario_comparison(
+            household=h,
+            inputs=inputs,
+            seed=42,
+            n_trials=100,
+        )
+
+        assert scens["Expenses 10% higher"].p_success <= base.p_success + 0.01, (
+            f"Expenses higher ({scens['Expenses 10% higher'].p_success:.3f})"
+            f" > Base ({base.p_success:.3f})"
+        )
+
+    def test_expenses_lower_not_below_base(self) -> None:
+        """Lower expenses should not reduce success below base."""
+        h = reference_household(retire_age=50)
+        inputs = SimulationInputs(n_iterations=100, cgt_on_drawdowns=True)
+
+        base = run_monte_carlo(household=h, inputs=inputs, seed=42)
+        scens = run_scenario_comparison(
+            household=h,
+            inputs=inputs,
+            seed=42,
+            n_trials=100,
+        )
+
+        assert scens["Expenses 10% lower"].p_success >= base.p_success - 0.01, (
+            f"Expenses lower ({scens['Expenses 10% lower'].p_success:.3f})"
+            f" < Base ({base.p_success:.3f})"
+        )
+
     def test_results_are_reproducible(self) -> None:
         """Same seed produces identical scenario comparison results."""
         h = reference_household(retire_age=50)
@@ -1592,7 +1679,7 @@ class TestScenarioComparison:
             n_trials=100,
         )
 
-        for key in ("No PT income", "Full offset depletion"):
+        for key in ("Earner 1 stops working", "Expenses 10% higher"):
             assert scens1[key].p_success == scens2[key].p_success
             assert scens1[key].bridge_median == scens2[key].bridge_median
 
