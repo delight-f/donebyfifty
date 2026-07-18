@@ -1672,12 +1672,15 @@ def run_scenario_comparison(
         Dict mapping scenario name to ScenarioComparisonResult.
 
     """
+    import warnings as _warnings
     from dataclasses import replace as dc_replace
 
     results: dict[str, ScenarioComparisonResult] = {}
 
     def _run(hh: Household, inp: SimulationInputs, label: str) -> None:
-        r = run_monte_carlo(hh, inp, seed=seed)
+        with _warnings.catch_warnings():
+            _warnings.simplefilter("ignore", UserWarning)
+            r = run_monte_carlo(hh, inp, seed=seed)
         results[label] = ScenarioComparisonResult(
             label=label,
             p_success=r.p_success,
