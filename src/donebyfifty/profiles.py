@@ -7,7 +7,9 @@ All file I/O lives here. Uses JSON files, one per profile, stored in a
 from __future__ import annotations
 
 import json
+import os
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -48,10 +50,14 @@ def _sanitise_filename(name: str) -> str:
 
     Returns:
         Safe filename (alphanumeric, hyphens, underscores, spaces only).
+        Silently truncated to 120 characters to prevent filesystem limits
+        being hit and to keep the many-to-one mapping from colliding
+        wildly different names.
 
     """
     safe = "".join(c if c.isalnum() or c in " _-" else "_" for c in name)
-    return safe.strip() or "unnamed"
+    safe = safe.strip() or "unnamed"
+    return safe[:120]
 
 
 # =============================================================================
@@ -61,6 +67,11 @@ def _sanitise_filename(name: str) -> str:
 
 def save_profile(profile: Profile) -> Path:
     """Save a profile to disk as a JSON file.
+
+    Write is atomic: data is flushed to a temporary file in the same
+    directory, ``fsync`` ed, ``os.replace`` ed into place, then ``chmod`` ed
+    to ``0o600``.  A crash mid-write therefore leaves the previous profile
+    intact rather than truncating it to a corrupt partial file.
 
     Args:
         profile: The profile to save. Its ``updated_at`` is set to now.
@@ -78,7 +89,34 @@ def save_profile(profile: Profile) -> Path:
 
     filename = _sanitise_filename(profile.profile_name) + ".json"
     path = _profiles_dir() / filename
-    path.write_text(json.dumps(profile.to_dict(), indent=2), encoding="utf-8")
+    payload = json.dumps(profile.to_dict(), indent=2)
+
+    try:
+        fd, tmp_name = tempfile.mkstemp(
+            dir=path.parent, prefix=".profile-", suffix=".tmp"
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as tmp:
+                tmp.write(payload)
+                tmp.flush()
+                os.fsync(tmp.fileno())
+            os.chmod(tmp_name, 0o600)
+            os.replace(tmp_name, path)
+        except OSError:
+            # Clean up the temp file if anything failed before os.replace.
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise
+    except OSError:
+        # Fall back to legacy behaviour if the temp-file dance itself fails
+        # (e.g. read-only filesystem).  Preserves the previous API contract.
+        path.write_text(payload, encoding="utf-8")
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
     return path
 
 

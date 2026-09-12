@@ -12,6 +12,12 @@ from typing import NoReturn
 
 from config import clear_tax_cache
 from models import Household, Profile, ResultsSession, SimulationInputs
+from profiles import (
+    delete_profile,
+    list_profiles,
+    load_profile,
+    save_profile,
+)
 from rich.prompt import IntPrompt, Prompt
 from simulation import run_monte_carlo
 from ui import (
@@ -25,13 +31,6 @@ from ui import (
     print_banner,
     review_before_run,
     show_results_menu,
-)
-
-from profiles import (
-    delete_profile,
-    list_profiles,
-    load_profile,
-    save_profile,
 )
 
 # Module-level tracking for seed re-run

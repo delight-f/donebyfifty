@@ -9,11 +9,12 @@ accept and return float values. Their internal arithmetic is identical to the
 verified original.
 
 Return assumptions: All asset-class return parameters (module-level constants
-below) represent real (inflation-adjusted) returns, consistent with the
-simulation engine's internal convention — the engine compounds in real terms
-and deflates dollar figures to today's dollars once at output
-(``simulation.py``). Returns are applied via lognormal draws using the standard
-Black-Scholes parameterisation (``mu = ln(1 + mean) - ½σ²``).
+below) represent real (inflation-adjusted) returns. The generators uplift each
+draw to nominal via their ``inflation`` argument
+(``(1 + real) * (1 + inflation) - 1``), matching the engine's nominal cash
+flows; ``simulation.py`` then deflates the output to today's dollars once.
+Returns are applied via lognormal draws using the standard Black-Scholes
+parameterisation (``mu = ln(1 + mean) - ½σ²``).
 Provenance and confidence for each figure are documented per-constant below.
 Not all figures are independently sourced; see individual comments for details.
 """
@@ -22,7 +23,7 @@ from __future__ import annotations
 
 import math
 import random
-from typing import Final, Literal, TypedDict, overload
+from typing import Final, Literal, Sequence, TypedDict, overload
 
 # =============================================================================
 # TYPE DEFINITIONS
@@ -37,19 +38,39 @@ class AssetHolding(TypedDict):
 
 
 # =============================================================================
-# CONSTANTS (Australian financial system, not family-specific)
+# TAX BRACKETS (FY2025-26, as amended Stage 3)
 # =============================================================================
 
-# Tax brackets: (threshold, rate) pairs
+# Resident marginal rates from 1 July 2024 (Income Tax Rates Act 1986, Sch 7).
+# The $135k/$190k thresholds are the amended Stage 3 settings — NOT the
+# pre-2024 $120k/$180k thresholds.
 BRACKETS: Final[tuple[tuple[float, float], ...]] = (
-    (18200, 0.00),
-    (45000, 0.16),
-    (135000, 0.30),
-    (190000, 0.37),
+    (18_200, 0.0),
+    (45_000, 0.16),
+    (135_000, 0.30),
+    (190_000, 0.37),
     (float("inf"), 0.45),
 )
 
 MEDICARE: Final[float] = 0.02
+
+# Medicare levy low-income reduction (FY2025-26 singles). Below the lower
+# threshold no levy is payable; between the thresholds the levy is 10% of the
+# excess over the lower threshold, capped at the full 2%. Families use a higher
+# threshold plus a per-dependent-child add-on.
+MEDICARE_LOW_INCOME_THRESHOLD: Final[float] = 28_011.0
+MEDICARE_LOW_INCOME_UPPER: Final[float] = 35_013.0
+MEDICARE_FAMILY_UPLIFT: Final[float] = 0.0  # placeholder; family table not sourced
+MEDICARE_CHILD_UPLIFT: Final[float] = 1_500.0  # per dependent child
+
+# Low Income Tax Offset (LITO), standard phase-out: full $700 to $37,500,
+# then 5c/$ down to $325 at $45,000, then 1.5c/$ to zero at ~$66,667.
+LITO_MAX: Final[float] = 700.0
+LITO_MID: Final[float] = 325.0  # offset remaining at the second taper start
+LITO_FIRST_TAPER_START: Final[float] = 37_500.0
+LITO_SECOND_TAPER_START: Final[float] = 45_000.0
+LITO_FIRST_TAPER_RATE: Final[float] = 0.05
+LITO_SECOND_TAPER_RATE: Final[float] = 0.015
 CGT_FLOOR_RATE: Final[float] = (
     0.30  # post-2027 minimum (floor) CGT rate on real indexed gains, per owner
 )
@@ -60,9 +81,6 @@ CGT_FLOOR_RATE: Final[float] = (
 
 # =============================================================================
 # Asset class return assumptions (real, inflation-adjusted)
-# =============================================================================
-# All returns are real (above inflation), consistent with the simulation engine's
-# internal convention. Applied via lognormal draws: r = exp(mu + sigma*Z) - 1
 # where mu = ln(1 + mean) - 0.5*sigma^2 (Black-Scholes parameterisation).
 # Provenance and confidence are documented per-constant below.
 # =============================================================================
@@ -266,33 +284,33 @@ EDU_SCHEDULE_TODAY: Final[dict[int, float]] = {
 # =============================================================================
 
 
-def tax(
-    taxable_income: float,
-    medicare_surcharge: float = 0.0,
-    brackets: tuple[tuple[float, float], ...] | None = None,
+def bracket_tax(
+    taxable_income: float, brackets: tuple[tuple[float, float], ...] | None = None
 ) -> float:
-    """Calculate Australian personal income tax plus Medicare levy.
+    """Progressive income tax from the bracket schedule, before offsets/levies.
 
-    Applies progressive marginal rates across the bracket schedule
-    and adds the 2% Medicare levy plus optional Medicare Levy Surcharge
-    on total taxable income.
+    Single source of truth for bracket progression: ``tax()``,
+    ``consulting_net_income()`` and the CGT bracket-stacking integration
+    (``cgt_rates_on_gain``) all evaluate the schedule through this function,
+    so ``tax(b) - tax(a)`` is exactly the tax on the slice ``[a, b]``.
 
     Args:
-        taxable_income: Total taxable income for the year.
-        medicare_surcharge: Additional Medicare Levy Surcharge rate
-            (e.g. 0.01 for Tier 1 MLS). Added to the standard 2% levy.
-        brackets: Optional bracket overrides for tax indexation.
+        taxable_income: Annual taxable income. Non-positive income yields 0.0.
+        brackets: Optional bracket overrides (e.g. indexed brackets).
             If None, uses the module-level ``BRACKETS``.
 
     Returns:
-        Total tax payable (income tax + Medicare levy + MLS).
+        Income tax payable on ``taxable_income``, excluding the Medicare levy,
+        the Medicare Levy Surcharge and all offsets. Never negative.
 
     """
-    active_brackets = brackets if brackets is not None else BRACKETS
+    if taxable_income <= 0.0:
+        return 0.0
+    active = brackets if brackets is not None else BRACKETS
     total_tax: float = 0.0
     prev_threshold: float = 0.0
 
-    for threshold, rate in active_brackets:
+    for threshold, rate in active:
         if taxable_income > threshold:
             total_tax += (threshold - prev_threshold) * rate
             prev_threshold = threshold
@@ -300,7 +318,92 @@ def tax(
             total_tax += (taxable_income - prev_threshold) * rate
             break
 
-    return total_tax + taxable_income * (MEDICARE + medicare_surcharge)
+    return total_tax
+
+
+def lito_offset(taxable_income: float) -> float:
+    """Low Income Tax Offset (LITO) available at a given taxable income.
+
+    Standard phase-out: the full $700 applies up to $37,500, tapers at 5c/$
+    to $325 at $45,000, then at 1.5c/$ to zero at about $66,667. The offset is
+    non-refundable — it can reduce income tax to, but not below, zero.
+    """
+    if taxable_income <= LITO_FIRST_TAPER_START:
+        return LITO_MAX
+    if taxable_income <= LITO_SECOND_TAPER_START:
+        tapered = LITO_MAX - LITO_FIRST_TAPER_RATE * (taxable_income - LITO_FIRST_TAPER_START)
+        return max(0.0, tapered)
+    return max(0.0, LITO_MID - LITO_SECOND_TAPER_RATE * (taxable_income - LITO_SECOND_TAPER_START))
+
+
+def medicare_levy(
+    taxable_income: float,
+    *,
+    dependants: int = 0,
+    has_spouse: bool = False,
+) -> float:
+    """Medicare levy with the low-income reduction applied.
+
+    Singles: no levy at or below ``MEDICARE_LOW_INCOME_THRESHOLD``; between the
+    thresholds the levy is 10% of the excess over the lower threshold, capped at
+    the full 2%. The family threshold is lifted when a spouse is present and by
+    ``MEDICARE_CHILD_UPLIFT`` per dependent child.
+
+    Note:
+        The family threshold uplift is a placeholder (see
+        ``MEDICARE_FAMILY_UPLIFT``) pending a sourced ATO figure; the child
+        add-on is the commonly cited ~$1,500/child.
+
+    """
+    lower = MEDICARE_LOW_INCOME_THRESHOLD + (
+        MEDICARE_FAMILY_UPLIFT if has_spouse else 0.0
+    ) + MEDICARE_CHILD_UPLIFT * dependants
+    upper = MEDICARE_LOW_INCOME_UPPER + (
+        MEDICARE_FAMILY_UPLIFT if has_spouse else 0.0
+    ) + MEDICARE_CHILD_UPLIFT * dependants
+    full_levy = taxable_income * MEDICARE
+    if taxable_income <= lower:
+        return 0.0
+    if taxable_income < upper:
+        return min(full_levy, 0.10 * (taxable_income - lower))
+    return full_levy
+
+
+def tax(
+    taxable_income: float,
+    medicare_surcharge: float = 0.0,
+    brackets: tuple[tuple[float, float], ...] | None = None,
+    *,
+    dependants: int = 0,
+    has_spouse: bool = False,
+) -> float:
+    """Calculate Australian personal income tax plus Medicare levy.
+
+    Applies progressive marginal rates across the bracket schedule, deducts the
+    non-refundable LITO, then adds the Medicare levy (with the low-income
+    reduction) plus any Medicare Levy Surcharge. Non-positive income yields 0.0.
+
+    Args:
+        taxable_income: Total taxable income for the year.
+        medicare_surcharge: Additional Medicare Levy Surcharge rate
+            (e.g. 0.01 for Tier 1 MLS). Added to the standard 2% levy and
+            charged on total taxable income (no low-income reduction applies).
+        brackets: Optional bracket overrides for tax indexation.
+            If None, uses the module-level ``BRACKETS``.
+        dependants: Number of dependent children (family levy threshold add-on).
+        has_spouse: Whether the taxpayer has a spouse (family levy threshold).
+
+    Returns:
+        Total tax payable (income tax + Medicare levy + MLS), never negative.
+
+    """
+    if taxable_income <= 0.0:
+        return 0.0
+
+    income_tax = max(0.0, bracket_tax(taxable_income, brackets) - lito_offset(taxable_income))
+    levy = medicare_levy(taxable_income, dependants=dependants, has_spouse=has_spouse)
+
+    return income_tax + levy + taxable_income * medicare_surcharge
 
 
 def marginal_rate(
@@ -330,23 +433,29 @@ def marginal_rate(
 def mls_rate_for_income(
     taxable_income: float,
     n_earners: int = 1,
+    n_children: int = 1,
 ) -> float:
     """Compute the Medicare Levy Surcharge rate for a given taxable income.
 
-    Selects singles or couple tiers based on ``n_earners`` (≥ 2 → couple).
+    Selects singles or family tiers based on ``n_earners`` (≥ 2 → family).
+    Family tier thresholds are lifted by the per-child add-on (the family base
+    already covers the first child, so ``n_children`` defaults to 1).
     Returns 0.0 for income below the lowest threshold.
 
     Args:
         taxable_income: Annual taxable income (combined for couples).
         n_earners: Number of earners in the household (1 = singles tiers).
-        tiers_single: Override singles tier thresholds.
-        tiers_couple: Override couple tier thresholds.
+        n_children: Dependent children (family tiers only).
 
     Returns:
         MLS rate as a decimal (e.g. 0.0125 for Tier 2).
 
     """
-    tiers = MLS_TIERS_COUPLE if n_earners >= 2 else MLS_TIERS_SINGLE
+    if n_earners >= 2:
+        uplift = MLS_FAMILY_CHILD_UPLIFT * (n_children - 1)
+        tiers = tuple((threshold + uplift, rate) for threshold, rate in MLS_TIERS_COUPLE)
+    else:
+        tiers = MLS_TIERS_SINGLE
     for threshold, rate in tiers:
         if taxable_income <= threshold:
             return rate
@@ -354,25 +463,30 @@ def mls_rate_for_income(
 
 
 # =============================================================================
-# MEDICARE LEVY SURCHARGE TIERS (as of FY2025-26)
+# MEDICARE LEVY SURCHARGE TIERS (FY2026-27)
 # =============================================================================
 
-# Singles thresholds and rates
+# FY2026-27 singles. Source: ATO MLS thresholds (secondary sources; the two ATO
+# pages returned HTTP 504 during review, so treat the intermediate boundaries as
+# best-available and keep them here as named constants for easy correction).
 MLS_TIERS_SINGLE: Final[tuple[tuple[float, float], ...]] = (
-    (90000.0, 0.0),  # Below $90k: no MLS
-    (105000.0, 0.01),  # $90k-$105k: Tier 1 (1.0%)
-    (140000.0, 0.0125),  # $105k-$140k: Tier 2 (1.25%)
-    (float("inf"), 0.015),  # $140k+: Tier 3 (1.5%)
+    (105_000.0, 0.0),  # below $105k: no MLS
+    (123_000.0, 0.01),  # $105k-$123k: Tier 1 (1.0%)
+    (164_000.0, 0.0125),  # $123k-$164k: Tier 2 (1.25%)
+    (float("inf"), 0.015),  # $164k+: Tier 3 (1.5%)
 )
 
-# Couple thresholds and rates
-# Note: MLS applies based on combined income for couples/families
+# FY2026-27 family thresholds (combined income). The base already allows for
+# one child; each further child adds MLS_FAMILY_CHILD_UPLIFT via
+# ``mls_rate_for_income``.
 MLS_TIERS_COUPLE: Final[tuple[tuple[float, float], ...]] = (
-    (180000.0, 0.0),  # Below $180k: no MLS
-    (210000.0, 0.01),  # $180k-$210k: Tier 1 (1.0%)
-    (280000.0, 0.0125),  # $210k-$280k: Tier 2 (1.25%)
-    (float("inf"), 0.015),  # $280k+: Tier 3 (1.5%)
+    (210_000.0, 0.0),  # below $210k: no MLS
+    (246_000.0, 0.01),  # $210k-$246k: Tier 1 (1.0%)
+    (328_000.0, 0.0125),  # $246k-$328k: Tier 2 (1.25%)
+    (float("inf"), 0.015),  # $328k+: Tier 3 (1.5%)
 )
+
+MLS_FAMILY_CHILD_UPLIFT: Final[float] = 1_500.0
 
 
 # =============================================================================
@@ -442,12 +556,62 @@ def clear_tax_cache() -> None:
 # =============================================================================
 
 
+def _require_correlation(name: str, value: float) -> None:
+    """Reject a correlation coefficient outside [-1, 1] with a clear error."""
+    if not math.isfinite(value) or not -1.0 <= value <= 1.0:
+        raise ValueError(f"{name}={value!r} is not a valid correlation (must be in [-1, 1])")
+
+
+def validate_correlations(rho_se: float, rho_ei: float, rho_si: float) -> None:
+    """Validate a 3x3 correlation matrix before Cholesky decomposition (M12).
+
+    Each coefficient must lie in [-1, 1]; ``rho_se`` must be strictly inside the
+    range because the Cholesky factor divides by ``sqrt(1 - rho_se**2)``. The
+    matrix must be positive semi-definite, i.e. its determinant
+    ``1 + 2*rho_se*rho_ei*rho_si - rho_se**2 - rho_ei**2 - rho_si**2`` is
+    non-negative. This replaces the silent ``max(0.0, l22_sq)`` clamp, so a
+    non-PSD matrix fails loudly and names the offending values.
+
+    Args:
+        rho_se: Equity-super correlation.
+        rho_ei: Equity-inflation correlation.
+        rho_si: Super-inflation correlation.
+
+    Raises:
+        ValueError: If any coefficient is out of range, ``|rho_se| == 1``, or
+            the implied matrix is not positive semi-definite.
+
+    """
+    _require_correlation("rho_se", rho_se)
+    _require_correlation("rho_ei", rho_ei)
+    _require_correlation("rho_si", rho_si)
+    if abs(rho_se) >= 1.0:
+        raise ValueError(
+            f"rho_se={rho_se!r} makes the correlation matrix singular "
+            "(division by sqrt(1 - rho_se**2))"
+        )
+    determinant = (
+        1.0
+        + 2.0 * rho_se * rho_ei * rho_si
+        - rho_se**2
+        - rho_ei**2
+        - rho_si**2
+    )
+    if determinant < -1e-12:
+        raise ValueError(
+            "correlation matrix is not positive semi-definite "
+            f"(determinant={determinant:.6g}) for rho_se={rho_se!r}, "
+            f"rho_ei={rho_ei!r}, rho_si={rho_si!r}"
+        )
+
+
 @overload
 def generate_correlated_returns(
     rho: float = SUPER_EQ_CORR,
     *,
     return_z: Literal[True],
     rng: random.Random | None = None,
+    inflation: float = 0.0,
 ) -> tuple[float, float, float]: ...
 
 
@@ -457,6 +621,7 @@ def generate_correlated_returns(
     *,
     return_z: Literal[False] = False,
     rng: random.Random | None = None,
+    inflation: float = 0.0,
 ) -> tuple[float, float]: ...
 
 
@@ -465,11 +630,14 @@ def generate_correlated_returns(
     *,
     return_z: bool = False,
     rng: random.Random | None = None,
+    inflation: float = 0.0,
 ) -> tuple[float, float] | tuple[float, float, float]:
     """Generate one year of correlated lognormal equity and super returns.
 
     Uses Cholesky decomposition to induce the specified correlation
-    between the two asset class return series.
+    between the two asset class return series. Note that ``rho`` is the
+    correlation of the underlying **log-returns** (the standard normal draws),
+    not of the exponentiated returns themselves.
 
     For a 2x2 correlation matrix [[1, rho], [rho, 1]]:
         L = [[1, 0], [rho, sqrt(1 - rho^2)]]
@@ -477,12 +645,21 @@ def generate_correlated_returns(
         x_super = rho * z1 + sqrt(1 - rho^2) * z2
     Then exponentiate with mean correction: exp(mu + sigma * x) - 1
 
+    The returned returns are uplifted from real to nominal using the
+    ``inflation`` parameter: ``(1 + real_gross) * (1 + inflation) - 1``.
+
     Args:
-        rho: Target Pearson correlation between equity and super returns.
+        rho: Correlation of the underlying equity and super **log-returns**
+            (standard normal draws), in [-1, 1].
         return_z: If True, also return the equity standard normal draw ``z1``
             for use in ``generate_asset_return()``.
         rng: Optional ``random.Random`` instance for reproducible
             series generation. Defaults to module-level ``random``.
+        inflation: Per-year inflation rate used to uplift real returns
+            to nominal. Default 0.0 (no uplift).
+
+    Raises:
+        ValueError: If ``rho`` is outside [-1, 1].
 
     Returns:
         If ``return_z`` is False: (equity_return, super_return).
@@ -490,6 +667,7 @@ def generate_correlated_returns(
         All returns are decimal fractions.
 
     """
+    _require_correlation("rho", rho)
     _rng = rng if rng is not None else random
     z1 = _rng.gauss(0, 1)
     z2 = _rng.gauss(0, 1)
@@ -497,8 +675,8 @@ def generate_correlated_returns(
     x_eq = z1
     x_super = rho * z1 + math.sqrt(1 - rho * rho) * z2
 
-    eq_r = math.exp(MU_EQ + EQ_STD * x_eq) - 1
-    super_r = math.exp(MU_SUPER + SUPER_STD * x_super) - 1
+    eq_r = math.exp(MU_EQ + EQ_STD * x_eq) * (1 + inflation) - 1
+    super_r = math.exp(MU_SUPER + SUPER_STD * x_super) * (1 + inflation) - 1
 
     if return_z:
         return eq_r, super_r, z1
@@ -506,7 +684,11 @@ def generate_correlated_returns(
 
 
 def generate_asset_return(
-    asset_class: str, eq_z: float, eq_r: float, deterministic: bool = False
+    asset_class: str,
+    eq_z: float,
+    eq_r: float,
+    deterministic: bool = False,
+    inflation: float = 0.0,
 ) -> float:
     """Generate a lognormal return for a given asset class, correlated with equity.
 
@@ -518,19 +700,25 @@ def generate_asset_return(
     When ``deterministic`` is True, the function returns the mean return
     without stochastic noise (used when running with mean returns).
 
+    The returned return is uplifted from real to nominal using the
+    ``inflation`` parameter. The unknown-class fallback returns ``eq_r``
+    which is already uplifted by the caller.
+
     Args:
         asset_class: One of ``"equity"``, ``"bonds"``, ``"cash"``,
             ``"property"``, ``"intl_equity"``.
         eq_z: The standard normal draw used for equity this year.
         eq_r: The actual equity return (used as fallback for unknown classes).
         deterministic: If True, return the mean return without stochastic noise.
+        inflation: Per-year inflation rate used to uplift real returns
+            to nominal. Default 0.0 (no uplift).
 
     Returns:
         The asset class return as a decimal fraction.
 
     """
     if asset_class not in ASSET_CLASS_PARAMS:
-        return eq_r  # fall back to equity for unknown classes
+        return eq_r  # fall back to equity for unknown classes (already uplifted)
 
     params = ASSET_CLASS_PARAMS[asset_class]
     rho = params["corr_with_eq"]
@@ -539,12 +727,12 @@ def generate_asset_return(
 
     # Deterministic mode: return mean return without stochastic noise
     if deterministic:
-        return mean_val
+        return (1 + mean_val) * (1 + inflation) - 1
 
     mu = _ASSET_MU.get(asset_class, math.log(1 + mean_val) - 0.5 * std_val**2)
     z_independent = random.gauss(0, 1)
     z_asset = rho * eq_z + math.sqrt(1 - rho * rho) * z_independent
-    return math.exp(mu + std_val * z_asset) - 1
+    return math.exp(mu + std_val * z_asset) * (1 + inflation) - 1
 
 
 # =============================================================================
@@ -557,12 +745,18 @@ def generate_correlated_triplet(
     rho_ei: float = INFLATION_EQ_CORR,
     rho_si: float = SUPER_INF_CORR,
     rng: random.Random | None = None,
+    inflation: float = 0.0,
 ) -> tuple[tuple[float, float], tuple[float, float], float]:
     """Generate one year of correlated equity, super, and inflation returns.
 
     Uses a 3×3 Cholesky decomposition to induce correlations among equity,
     super, and inflation. Handles the general case where all three are
-    pairwise correlated.
+    pairwise correlated. Each ``rho`` is the correlation of the underlying
+    **log-returns** (standard normal draws), not of the returns themselves.
+
+    The equity and super returns are uplifted from real to nominal using the
+    ``inflation`` parameter. The inflation return (``inf_r``) is not uplifted
+    — it *is* the inflation.
 
     Args:
         rho_se: Equity-super correlation.
@@ -570,12 +764,19 @@ def generate_correlated_triplet(
         rho_si: Super-inflation correlation.
         rng: Optional ``random.Random`` instance for reproducible
             series generation. Defaults to module-level ``random``.
+        inflation: Per-year inflation rate used to uplift real returns
+            to nominal. Default 0.0 (no uplift).
+
+    Raises:
+        ValueError: If the correlations are out of range or do not form a
+            positive semi-definite matrix.
 
     Returns:
         ((eq_r, eq_z), (super_r, super_z), inf_r) where eq_r, super_r, inf_r
         are lognormal returns and eq_z, super_z are standard normal draws.
 
     """
+    validate_correlations(rho_se, rho_ei, rho_si)
     _rng = rng if rng is not None else random
     # Three independent standard normals
     z1 = _rng.gauss(0, 1)
@@ -597,14 +798,210 @@ def generate_correlated_triplet(
 
     l21 = (rho_si - rho_ei * rho_se) / math.sqrt(1 - rho_se * rho_se)
     l22_sq = 1 - rho_ei * rho_ei - l21 * l21
-    l22 = math.sqrt(max(0.0, l22_sq))  # guard against tiny numerical negatives
+    l22 = math.sqrt(l22_sq)  # PSD validated above, so l22_sq >= 0
     x_inf = rho_ei * z1 + l21 * z2_raw + l22 * z3_raw
 
-    eq_r = math.exp(MU_EQ + EQ_STD * x_eq) - 1
-    super_r = math.exp(MU_SUPER + SUPER_STD * x_super) - 1
+    eq_r = math.exp(MU_EQ + EQ_STD * x_eq) * (1 + inflation) - 1
+    super_r = math.exp(MU_SUPER + SUPER_STD * x_super) * (1 + inflation) - 1
     inf_r = math.exp(MU_INFLATION + INFLATION_STD * x_inf) - 1
 
     return (eq_r, x_eq), (super_r, x_super), inf_r
+
+
+def cgt_on_gain(
+    ordinary_income: float,
+    gain: float,
+    brackets: tuple[tuple[float, float], ...] | None = None,
+) -> tuple[float, float]:
+    """CGT on a capital gain stacked on top of the owner's ordinary income.
+
+    H6: Australian CGT stacks the gain on the last dollar of ordinary income
+    (s102-5 ITAA 1997 — the gain is assessable income, not a flat rate on the
+    whole amount). Tax is therefore the exact tax on the slice
+    ``[income, income + gain]``, obtained as ``bracket_tax(b) - bracket_tax(a)``.
+
+    Treasury Laws Amendment (Tax Reform No. 1) Act 2026 (Cth): for disposals
+    from 1 July 2027 the 50% discount is replaced by CPI indexation, and a
+    per-owner 30% minimum effective rate applies — so the slice tax is floored
+    at ``CGT_FLOOR_RATE * gain``.
+
+    Args:
+        ordinary_income: The owner's taxable income before the gain.
+        gain: The (already indexed, post-discount) assessable gain.
+        brackets: Optional bracket overrides (e.g. indexed brackets).
+
+    Returns:
+        ``(tax, effective_rate)``. ``effective_rate`` is ``tax / gain`` (0 when
+        ``gain <= 0``), so callers can weight it across owners if needed.
+
+    """
+    if gain <= 0.0:
+        return 0.0, 0.0
+    slice_tax = bracket_tax(ordinary_income + gain, brackets) - bracket_tax(
+        ordinary_income, brackets
+    )
+    tax = max(slice_tax, CGT_FLOOR_RATE * gain)
+    return tax, tax / gain
+
+
+def cgt_weighted_rate(
+    owners: Sequence[tuple[float, float]],
+    gain: float,
+    brackets: tuple[tuple[float, float], ...] | None = None,
+    discount: float = 0.0,
+) -> tuple[float, float]:
+    """Ownership-weighted CGT effective rate for a jointly-held gain (H6).
+
+    Applies ``cgt_on_gain`` per owner on that owner's gain share, so each owner
+    is taxed from their own income level (preserving the per-owner 30% floor),
+    then weights the resulting taxes by the shares already embedded in the
+    per-owner call. This replaces the previous flat
+    ``max(marginal_rate(income), 0.30)`` applied to the whole gain.
+
+    Args:
+        owners: ``(ordinary_income, ownership_share)`` per owner. Shares should
+            sum to 1.0; owners with a non-positive share are ignored.
+        gain: The account's total nominal gain.
+        brackets: Optional bracket overrides (e.g. indexed brackets).
+        discount: Fraction of the gain excluded before stacking (0.5 models the
+            pre-reform 50% CGT discount; 0.0 for post-reform indexed gains).
+
+    Returns:
+        ``(weighted_rate, raw_weighted_rate)`` — the floored and un-floored
+        effective rates on the whole nominal gain (both 0 when ``gain <= 0``).
+
+    """
+    if gain <= 0.0:
+        return 0.0, 0.0
+    floored_tax = 0.0
+    raw_tax = 0.0
+    for income, share in owners:
+        if share <= 0:
+            continue
+        assessable = gain * share * (1.0 - discount)
+        tax, _ = cgt_on_gain(income, assessable, brackets)
+        floored_tax += tax
+        raw_tax += bracket_tax(income + assessable, brackets) - bracket_tax(income, brackets)
+    return floored_tax / gain, raw_tax / gain
+
+
+def cgt_split_tax(
+    owners: Sequence[tuple[float, float]],
+    pre_reform_gain: float,
+    post_reform_gain: float,
+) -> tuple[float, float]:
+    """Ownership-weighted CGT on a disposal straddling 30 June 2027.
+
+    Applies ``cgt_on_2027_disposal`` per owner on that owner's share of each
+    portion and sums the tax. Returned as tax amounts (not rates) so the caller
+    can divide by whichever gain base its sale machinery uses.
+
+    Args:
+        owners: ``(ordinary_income, ownership_share)`` per owner.
+        pre_reform_gain: Nominal gain accrued to 30 June 2027 (pre-discount).
+        post_reform_gain: CPI-indexed gain accrued from 30 June 2027.
+
+    Returns:
+        ``(floored_tax, tax_without_floor)``.
+
+    """
+    floored_tax = 0.0
+    raw_tax = 0.0
+    for income, share in owners:
+        if share <= 0:
+            continue
+        tax, tax_without_floor, _ = cgt_on_2027_disposal(
+            income,
+            pre_reform_gain=pre_reform_gain * share,
+            post_reform_gain=post_reform_gain * share,
+        )
+        floored_tax += tax
+        raw_tax += tax_without_floor
+    return floored_tax, raw_tax
+
+
+# 30 June 2027 reform commencement, expressed as a fractional simulation year.
+REFORM_DATE_YEAR: Final[float] = 2027.5
+
+
+class CostBaseLot(TypedDict):
+    """One acquisition-dated tranche of an asset's cost base (H5)."""
+
+    basis: float  # cost-base amount incurred
+    incurred: int  # simulation year in which the amount was incurred
+
+
+def indexed_cost_base(
+    lots: Sequence[CostBaseLot],
+    disposal_year: int,
+    cumulative_inflation: Sequence[float],
+) -> float:
+    """CPI-index each cost-base lot from its own incurrence date.
+
+    s960-275 ITAA 1997 keys the indexation factor off when each amount was
+    incurred. ``cumulative_inflation[y]`` is the cumulative CPI multiplier from
+    simulation year 0 to year ``y`` (index 0 == 1.0), so
+    ``cumulative_inflation[incurred]`` is the lot's own base index and a
+    year-0 lot receives the full horizon indexation rather than none.
+
+    Args:
+        lots: Acquisition-dated cost-base tranches.
+        disposal_year: Year of disposal (indexes ``cumulative_inflation``).
+        cumulative_inflation: Cumulative CPI multipliers by simulation year.
+
+    Returns:
+        The indexed cost base (nominal), always >= the nominal cost base.
+
+    """
+    disposal_index = cumulative_inflation[disposal_year]
+    return sum(
+        lot["basis"] * disposal_index / cumulative_inflation[lot["incurred"]] for lot in lots
+    )
+
+
+def cgt_on_2027_disposal(
+    ordinary_income: float,
+    *,
+    pre_reform_gain: float,
+    post_reform_gain: float,
+) -> tuple[float, float, float]:
+    """CGT on a disposal straddling the 30 June 2027 reform line.
+
+    Subdiv 112-E ITAA 1997 deems a disposal and reacquisition at market value on
+    30 June 2027. The gain is split and each portion is taxed under its own
+    regime — the two benefits are never stacked on the same portion:
+
+    * pre-reform portion: 50% CGT discount retained, no indexation;
+    * post-reform portion: CPI-indexed (caller passes the indexed gain), no
+      discount, 30% minimum effective rate per owner.
+
+    Both portions are assessable income stacked on ordinary income (H6); the
+    discounted pre-reform amount is stacked first, then the post-reform amount
+    on top of that.
+
+    Args:
+        ordinary_income: Owner's taxable income before the gain.
+        pre_reform_gain: Nominal gain accrued to 30 June 2027 (pre-discount).
+        post_reform_gain: CPI-indexed gain accrued from 30 June 2027.
+
+    Returns:
+        ``(total_tax, tax_without_floor, effective_rate)`` where
+        ``tax_without_floor`` omits the 30% floor on the post-reform portion.
+
+    """
+    pre_assessable = 0.5 * max(0.0, pre_reform_gain)
+    post_assessable = max(0.0, post_reform_gain)
+
+    pre_tax = bracket_tax(ordinary_income + pre_assessable) - bracket_tax(ordinary_income)
+    stacked = ordinary_income + pre_assessable
+    post_slice = bracket_tax(stacked + post_assessable) - bracket_tax(stacked)
+
+    post_tax = max(post_slice, CGT_FLOOR_RATE * post_assessable)
+    total = pre_tax + post_tax
+    total_without_floor = pre_tax + post_slice
+    gross_gain = pre_reform_gain + post_reform_gain
+    effective = total / gross_gain if gross_gain > 0 else 0.0
+    return total, total_without_floor, effective
 
 
 # =============================================================================
@@ -632,8 +1029,11 @@ def sell_assets(
       - Minimum effective tax rate of 30% on real gains, per owner
         (new s 115-100) — Phase 2
       - Effective rate = max(marginal_rate, 0.30) per owner
-      - Transitional treatment for gains accrued pre-1/7/2027 — Phase 3,
-        deferred, not yet implemented
+      - Transitional (30 Jun 2027) split: ``cgt_on_2027_disposal`` implements the
+        pre/post split and ``indexed_cost_base`` indexes acquisition-dated lots.
+        This function still takes ONE indexation factor, so a disposal that
+        straddles the reform line must be routed through those helpers once the
+        caller supplies lots and the market value at 30 Jun 2027.
 
     ``weighted_marginal_rate`` should be the ownership-weighted average of
     max(each_owner_marginal_rate, 0.30) for jointly-held accounts,
@@ -811,8 +1211,10 @@ def amortize_mortgage_monthly(
     Interest is charged on effective debt (mortgage - offset, floored at 0),
     not the gross mortgage principal.
 
-    This is a pure function conversion from the original which mutated a
-    dataclass in-place. The internal arithmetic is identical.
+    Where the payment does not cover the interest, the shortfall is
+    capitalised: the balance grows. This is the honest treatment for the
+    rate-stress scenarios (M11); the previous behaviour dropped the unpaid
+    interest, understating debt exactly when it mattered most.
 
     Args:
         mortgage: Current mortgage principal.
@@ -832,12 +1234,10 @@ def amortize_mortgage_monthly(
             break
         effective_debt = max(0.0, m - o)
         interest = effective_debt * monthly_rate
-        principal_payment = monthly_pmt - interest
-        if principal_payment < 0:
-            principal_payment = 0.0
-        elif principal_payment > m:
-            principal_payment = m
-        m -= principal_payment
+        # M11: capitalise any interest the payment does not cover, so the
+        # balance grows (negative amortisation) rather than the shortfall
+        # silently vanishing. A payment larger than the balance clamps to zero.
+        m += interest - monthly_pmt
         if m <= 0:
             m = 0.0
             break

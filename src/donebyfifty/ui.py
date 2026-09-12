@@ -19,7 +19,6 @@ from config import (
     BK_THETA,
     CONC_CAP,
     DEFAULT_CONC_CAP_GROWTH_RATE,
-    DEFAULT_DIV293_GROWTH_RATE,
     DEFAULT_SIM_START_AGE,
     DIV293_RATE,
     DIV293_THRESHOLD,
@@ -36,17 +35,43 @@ from models import (
     Household,
     InvestmentAccount,
     MortgageAccount,
+    Ownership,
     ResultsSession,
     SimulationInputs,
     SimulationResults,
 )
 from primitives import ASSET_CLASS_PARAMS
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 from rich.prompt import Prompt
 from rich.table import Table
 from rich.text import Text
 from simulation import RetirementSearchResult
+
+# =============================================================================
+# WILSON SCORE INTERVAL (H8b — binomial uncertainty on p_success)
+# =============================================================================
+
+
+def _wilson_interval(p: float, n: int, z: float = 1.96) -> tuple[float, float]:
+    """Return the Wilson score interval for a binomial proportion.
+
+    Args:
+        p: Observed proportion (0–1).
+        n: Number of trials.
+        z: Z-score for the desired confidence level (1.96 = 95%).
+
+    Returns:
+        (lower, upper) bounds of the interval, clamped to [0, 1].
+
+    """
+    if n <= 0:
+        return (0.0, 1.0)
+    denom = 1.0 + z * z / n
+    centre = (p + z * z / (2 * n)) / denom
+    spread = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / denom
+    return (max(0.0, centre - spread), min(1.0, centre + spread))
 
 # =============================================================================
 # CONSOLE
@@ -82,7 +107,8 @@ def _ascii_probability_chart(
 
     Shows the actual failure count alongside the percentage when trials
     data is available, so 99.998% (1 failure in 50,000) is not misleadingly
-    displayed as 100.0%.
+    displayed as 100.0%.  Also shows a 95% Wilson score interval so the
+    reader can see the Monte Carlo uncertainty on the proportion.
 
     Args:
         p_success: Overall success probability (0-1).
@@ -96,15 +122,24 @@ def _ascii_probability_chart(
     pct = p_success * 100.0
     threshold_pct = success_threshold * 100.0
     failure_note = ""
+    ci_note = ""
     if trials is not None and trials > 0:
         failures = round(trials * (1.0 - p_success))
         if failures > 0:
             failure_note = f"  ({failures} of {trials} paths failed)"
         else:
             failure_note = f"  (0 of {trials} paths failed)"
+        lo, hi = _wilson_interval(p_success, trials)
+        ci_note = f"  [95% CI: {lo * 100:.1f}\u2013{hi * 100:.1f}%]"
     if pct >= threshold_pct:
-        return f"  Success probability: {pct:.2f}%  ({threshold_pct:.0f}% threshold: reached){failure_note}"
-    return f"  Success probability: {pct:.2f}%  [red]({threshold_pct:.0f}% threshold: not reached)[/]{failure_note}"
+        return (
+            f"  Success probability: {pct:.2f}%{ci_note}  "
+            f"({threshold_pct:.0f}% threshold: reached){failure_note}"
+        )
+    return (
+        f"  Success probability: {pct:.2f}%{ci_note}  "
+        f"[red]({threshold_pct:.0f}% threshold: not reached)[/]{failure_note}"
+    )
 
 
 def print_banner() -> None:
@@ -531,7 +566,9 @@ def _configure_earner(
             )
 
     # Display super contribution warnings using actual start age
-    _display_earner_super_warnings(label, salary, sg / 100, retire_age, start_age)
+    _display_earner_super_warnings(
+        label, salary, sg / 100, retire_age, start_age, salary_growth_rate=sal_growth / 100
+    )
 
     return Earner(
         label=label,
@@ -690,7 +727,7 @@ def _configure_mortgage(label: str, defaults: MortgageAccount | None = None) -> 
             lo=1,
             hi=100,
         )
-        theta_v: float | None = _prompt_float(
+        theta_v = _prompt_float(
             f"  Long-run average mortgage rate in % (default {BK_THETA * 100:.1f}% = historical average)",
             default=BK_THETA * 100,
             lo=1.0,
@@ -789,7 +826,7 @@ def _configure_account(
         )
 
     # ── Ownership split prompt (multi-earner, non-offset only) ──────
-    ownership: dict[int, float] = {0: 1.0}
+    ownership: Ownership = Ownership({0: 1.0})
     if num_earners > 1 and not is_offset:
         el = earner_labels or [f"Earner {i + 1}" for i in range(num_earners)]
         console.print(f"  [{THEME_COLOR_BRIGHT}]Ownership split:[/]")
@@ -808,7 +845,7 @@ def _configure_account(
                 )
             shares[ei] = pct / 100
             remaining -= pct
-        ownership = shares
+        ownership = Ownership(shares)
 
     return InvestmentAccount(
         label=label,
@@ -871,7 +908,7 @@ def _configure_earners_section(
     for e in earners:
         if e.employment_type == "not_employed" and e.salary > 0:
             console.print(
-                f"[yellow]Warning: Earner '{e.label}' has "
+                f"[yellow]Warning: Earner '{escape(e.label)}' has "
                 f"employment_type='not_employed' but salary > 0 ({e.salary:,.0f}). "
                 f"PT income will be double-counted with salary income. "
                 f"Set salary to 0 or change employment type.[/]"
@@ -926,13 +963,27 @@ def _configure_children_section(
 
 def _configure_accounts_section(
     existing: Household | None,
+    *,
+    earners: tuple[Earner, ...] | None = None,
 ) -> tuple[InvestmentAccount, ...]:
-    """Configure all investment accounts, reusing existing values as defaults."""
-    # Determine earner count and labels for ownership split prompt
-    n_earners = len(existing.earners) if existing and existing.earners else 1
-    earner_labels = (
-        [e.label for e in existing.earners] if existing and existing.earners else ["Earner 1"]
+    """Configure all investment accounts, reusing existing values as defaults.
+
+    Args:
+        existing: Pre-existing household (for account defaults).
+        earners: The freshly configured earners.  When ``None`` (legacy
+            callers), falls back to ``existing.earners``.  This parameter
+            is required so that the ownership-split prompt sees the
+            *new* earners rather than the pre-edit ones.
+
+    """
+    # Determine earner count and labels for ownership split prompt.
+    # Use the freshly built earners when provided (H1 fix); fall back to
+    # the existing household for backward compatibility with edit_household.
+    active_earners = earners if earners is not None else (
+        existing.earners if existing and existing.earners else (Earner(),)
     )
+    n_earners = len(active_earners)
+    earner_labels = [e.label for e in active_earners]
 
     accounts: list[InvestmentAccount] = []
     has_accounts = _prompt_yn(
@@ -990,9 +1041,9 @@ def _link_offsets_to_mortgages(
             )
         else:
             for ol in offset_labels:
-                console.print(f"  [dim]Which mortgage does '{ol}' offset?[/]")
+                console.print(f"  [dim]Which mortgage does '{escape(ol)}' offset?[/]")
                 for mi, m in enumerate(result, 1):
-                    console.print(f"    [{mi}]. {m.label}[/]")
+                    console.print(f"    [{mi}]. {escape(m.label)}[/]")
                 choice = _prompt_int("  Choice", lo=1, hi=len(result))
                 idx = choice - 1
                 m = result[idx]
@@ -1055,7 +1106,7 @@ def configure_household(
     earners = _configure_earners_section(preset, existing, start_age)
     mortgages = _configure_mortgages_section(existing)
     children = _configure_children_section(preset, existing)
-    accounts = _configure_accounts_section(existing)
+    accounts = _configure_accounts_section(existing, earners=earners)
     mortgages = tuple(_link_offsets_to_mortgages(list(accounts), list(mortgages)))
     living, target = _configure_expenses_section(existing)
     return Household(
@@ -1137,7 +1188,8 @@ def edit_household(
         elif choice == 4:
             accounts = list(
                 _configure_accounts_section(
-                    _make_dummy_household(earners, mortgages, children, accounts, living, target)
+                    _make_dummy_household(earners, mortgages, children, accounts, living, target),
+                    earners=tuple(earners),
                 )
             )
             mortgages = _link_offsets_to_mortgages(accounts, mortgages)
@@ -1377,11 +1429,11 @@ def display_results(
 
     console.print(table)
 
-    # ── Bootstrap standard errors (when available) ──────────────────
+    # ── Standard errors (when available) ──────────────────
     if results.bridge_mean_se is not None:
         console.print()
         se_table = Table(
-            title="Uncertainty (bootstrap SE, 200 resamples)",
+            title="Uncertainty (bootstrap SE for percentiles; analytic SE for mean)",
             border_style="dim",
             box=None,
         )
@@ -1389,36 +1441,46 @@ def display_results(
         se_table.add_column("Estimate", justify="right", style=THEME_COLOR)
         se_table.add_column("SE", justify="right", style=THEME_COLOR)
         se_table.add_column("SE %", justify="right", style=THEME_COLOR)
+        se_table.add_column("", style="dim")  # method note
 
+        # Mean uses analytic SE (stdev/sqrt(n)); percentiles use bootstrap.
         se_rows = [
-            ("Mean", results.bridge_mean, results.bridge_mean_se),
-            ("Median", results.bridge_median, results.bridge_median_se),
-            ("P5", results.bridge_p5, results.bridge_p5_se),
-            ("P95", results.bridge_p95, results.bridge_p95_se),
+            ("Mean", results.bridge_mean, results.bridge_mean_se, "analytic"),
+            ("Median", results.bridge_median, results.bridge_median_se, "bootstrap"),
+            ("P5", results.bridge_p5, results.bridge_p5_se, "bootstrap"),
+            ("P95", results.bridge_p95, results.bridge_p95_se, "bootstrap"),
         ]
-        for label, est, se in se_rows:
+        for label, est, se, method in se_rows:
             if se is not None:
+                # M2 fix: use abs(est) so negative estimates (e.g. P5 bridge)
+                # do not invert the colour code.  Handle est == 0 before sign.
                 if est != 0:
-                    se_pct = se / est * 100
+                    se_pct = se / abs(est) * 100
                 else:
                     se_pct = float("inf") if se > 0 else 0.0
 
-                # Color-code relative SE: green <2%, yellow 2-4%, orange 5-9%, red >=10%
-                if se_pct < 2.0:
+                # Bands widened to match the bootstrap estimator's own noise
+                # (~5% relative error at B=200).  Documented bands:
+                #   green  < 5%   (tight — SE is small relative to estimate)
+                #   yellow 5–10%  (moderate)
+                #   orange 10–20% (loose)
+                #   red    >= 20% (very loose — estimate is noisy)
+                if se_pct < 5.0:
                     se_color = THEME_COLOR  # green
-                elif se_pct < 5.0:
-                    se_color = THEME_COLOR_WARN  # yellow
                 elif se_pct < 10.0:
+                    se_color = THEME_COLOR_WARN  # yellow
+                elif se_pct < 20.0:
                     se_color = "dark_orange"
                 else:
                     se_color = THEME_COLOR_ERROR  # red
 
-                se_pct_str = f"{se_pct:.1f}%"
+                se_pct_str = f"{se_pct:.1f}%" if se_pct != float("inf") else "inf"
                 se_table.add_row(
                     label,
                     _fmt_dollar(est),
                     _fmt_dollar(se),
                     f"[{se_color}]{se_pct_str}[/]",
+                    method,
                 )
         console.print(se_table)
 
@@ -1571,12 +1633,12 @@ def _display_earner_super_warnings(
     sg_rate: float,
     retirement_age: int,
     start_age: int = DEFAULT_SIM_START_AGE,
+    salary_growth_rate: float = 0.0,
 ) -> None:
     """Display real-time warnings about superannuation caps and Division 293.
 
-    Uses config-level default indexation rates for projections. The
-    projection is approximate — actual simulation uses the user's
-    configured growth rates which may differ.
+    Uses the earner's own salary growth and the config-default cap indexation
+    rates, matching the engine's projection rules.
 
     Args:
         earner_label: The earner's label.
@@ -1584,6 +1646,7 @@ def _display_earner_super_warnings(
         sg_rate: Super Guarantee rate.
         retirement_age: Earner's retirement age.
         start_age: Simulation start age (default: ``DEFAULT_SIM_START_AGE``).
+        salary_growth_rate: Earner's annual salary growth (decimal).
 
     """
     warnings = _super_warning_messages(
@@ -1591,6 +1654,7 @@ def _display_earner_super_warnings(
         salary=salary,
         sg_rate=sg_rate,
         years=retirement_age - start_age,
+        salary_growth_rate=salary_growth_rate,
     )
     if warnings:
         console.print()
@@ -1608,18 +1672,27 @@ def _super_warning_messages(
     salary: float,
     sg_rate: float,
     years: int,
+    salary_growth_rate: float = 0.0,
+    conc_cap_growth_rate: float = DEFAULT_CONC_CAP_GROWTH_RATE,
+    sg_max_base_growth_rate: float = DEFAULT_CONC_CAP_GROWTH_RATE,
 ) -> list[str]:
     """Build warning messages about super caps and Div 293 for an earner.
 
-    Uses config-default indexation rates for cap and threshold
-    projections. Called from both the earner config UI and the
-    post-simulation results display.
+    Projects with the same rules the engine uses: salary at the earner's own
+    growth rate, the concessional cap and SG maximum base at their configured
+    indexation rates, and the Division 293 threshold left statutory (the engine
+    never indexes it). M16 — the UI previously grew salary at the cap-indexation
+    rate and indexed the Div 293 threshold at the deprecated rate, so a high
+    earner the engine taxes could be shown no warning.
 
     Args:
         earner_label: Earner display name.
         salary: Current annual salary.
         sg_rate: Super Guarantee rate (decimal).
         years: Years between start age and retirement (for indexation).
+        salary_growth_rate: Earner's annual salary growth (decimal).
+        conc_cap_growth_rate: Concessional cap indexation rate.
+        sg_max_base_growth_rate: SG maximum salary base indexation rate.
 
     Returns:
         List of warning strings (empty if none triggered).
@@ -1629,10 +1702,11 @@ def _super_warning_messages(
 
     years = max(0, years)
 
-    # Projected values using config-default growth rates
-    indexed_conc_cap = CONC_CAP * (1 + DEFAULT_CONC_CAP_GROWTH_RATE) ** years
-    indexed_salary = salary * (1 + DEFAULT_CONC_CAP_GROWTH_RATE) ** years
-    sg_contribution = min(indexed_salary, SG_MAX_BASE) * sg_rate
+    # Projected values using the engine's indexation bases.
+    indexed_conc_cap = CONC_CAP * (1 + conc_cap_growth_rate) ** years
+    indexed_sg_max = SG_MAX_BASE * (1 + sg_max_base_growth_rate) ** years
+    indexed_salary = salary * (1 + salary_growth_rate) ** years
+    sg_contribution = min(indexed_salary, indexed_sg_max) * sg_rate
 
     if sg_contribution > indexed_conc_cap:
         warnings.append(
@@ -1641,11 +1715,11 @@ def _super_warning_messages(
             f"Excess may be subject to excess contributions tax.[/]"
         )
 
-    indexed_div293_threshold = DIV293_THRESHOLD * (1 + DEFAULT_DIV293_GROWTH_RATE) ** years
-    if indexed_salary > indexed_div293_threshold and sg_contribution > 0:
+    # Division 293 threshold is statutory at $250,000 — it is never indexed.
+    if indexed_salary > DIV293_THRESHOLD and sg_contribution > 0:
         warnings.append(
-            f"  ⚠️  [bold {THEME_COLOR_WARN}]Division 293 applies for {earner_label} "
-            f"(income ${salary:,.0f} > projected threshold ${indexed_div293_threshold:,.0f}). "
+            f"  ⚠️  [bold {THEME_COLOR_WARN}]Division 293 applies for {escape(earner_label)} "
+            f"(income ${indexed_salary:,.0f} > threshold ${DIV293_THRESHOLD:,.0f}). "
             f"An additional {DIV293_RATE * 100:.0f}% tax on concessional contributions is deducted"
             f" from take-home pay in the simulation (worst-case assumption).[/]"
         )
@@ -1670,6 +1744,7 @@ def _display_contribution_warnings(household: Household, start_age: int) -> None
                 salary=earner.salary,
                 sg_rate=earner.sg_rate,
                 years=earner.retirement_age - start_age,
+                salary_growth_rate=earner.salary_growth_rate,
             )
         )
 
@@ -1728,7 +1803,7 @@ def review_before_run(
             income_parts = [f"self-employed ${e.salary:,.0f}"]
         income_str = " + ".join(income_parts)
         hh_lines.append(
-            f"  {e.label}: {emp}, {income_str}, "
+            f"  {escape(e.label)}: {emp}, {income_str}, "
             f"retire at {e.retirement_age}, super access at {e.super_access_age}"
             f"{pt_info}"
         )
@@ -1736,13 +1811,13 @@ def review_before_run(
         hh_lines.append(f"[bold]Children ({household.num_children}):[/]")
         for c in household.children:
             edu = "custom schedule" if c.education_schedule else "default schedule"
-            hh_lines.append(f"  {c.label}: age {c.age}, {edu}")
+            hh_lines.append(f"  {escape(c.label)}: age {c.age}, {edu}")
     if household.mortgages:
         hh_lines.append(f"[bold]Mortgages ({household.num_mortgages}):[/]")
         for m in household.mortgages:
             stoch_tag = " [dim](stochastic rates)[/dim]" if m.interest_rate_stochastic else ""
             hh_lines.append(
-                f"  {m.label}: ${m.principal:,.0f} at {m.interest_rate * 100:.2f}%"
+                f"  {escape(m.label)}: ${m.principal:,.0f} at {m.interest_rate * 100:.2f}%"
                 f"{stoch_tag}, "
                 f"${m.monthly_payment:,.0f}/month"
             )
@@ -1755,9 +1830,9 @@ def review_before_run(
             if len(household.earners) > 1 and not a.is_offset and len(a.ownership) > 1:
                 for ei, share in sorted(a.ownership.items()):
                     if share > 0 and ei < len(household.earners):
-                        owner_parts.append(f"{household.earners[ei].label} {share * 100:.0f}%")
+                        owner_parts.append(f"{escape(household.earners[ei].label)} {share * 100:.0f}%")
             owner_str = f" — {' / '.join(owner_parts)}" if owner_parts else ""
-            hh_lines.append(f"  {a.label}: ${a.market_value:,.0f}{tag}{owner_str}")
+            hh_lines.append(f"  {escape(a.label)}: ${a.market_value:,.0f}{tag}{owner_str}")
     hh_lines.append(
         f"[bold]Expenses:[/] ${household.base_living_expenses:,.0f}/yr base annual, "
         f"${household.retirement_target:,.0f}/yr retirement target "
@@ -1971,9 +2046,11 @@ def _view_near_miss(session: ResultsSession) -> None:
     """
     r = session.results
 
-    # Near-miss rate
+    # Near-miss rate. B2's M5 made ``near_miss_rate`` the fraction of trials
+    # that crossed below the threshold, so it is displayed directly — inverting
+    # it would show the success rate under a failure label.
     console.print()
-    near_miss_pct = (1.0 - r.near_miss_rate) * 100
+    near_miss_pct = r.near_miss_rate * 100
     console.print(
         f"  [bold]Near-miss analysis[/] (threshold: \u2264 {_fmt_dollar(r.near_miss_threshold)})"
     )
@@ -2072,6 +2149,8 @@ def _view_drawdown_composition(session: ResultsSession) -> None:
 
     Shows median offset draws and non-offset (investment sale) draws
     per year, in nominal dollars (drawn amounts are inherently nominal).
+    Summary totals use true per-trial quantiles when available (M4b),
+    otherwise fall back to sum-of-per-year-medians with an explicit label.
     """
     r = session.results
     ages = r.bridge_by_age_ages
@@ -2080,12 +2159,7 @@ def _view_drawdown_composition(session: ResultsSession) -> None:
         console.print(f"  [bold {THEME_COLOR_WARN}]No drawdown composition data available.[/]")
         return
 
-    # Compute total (across all years) for summary
-    total_offset = sum(r.offset_drawn_p50)
-    total_non_offset = sum(r.non_offset_drawn_p50)
-    total_cgt = sum(r.cgt_paid_p50)
-
-    # Per-year table
+    # Per-year table (unchanged — these are per-year medians)
     table = Table(
         title="Drawdown source composition (median per year, nominal)",
         border_style=THEME_COLOR_ACCENT,
@@ -2096,18 +2170,18 @@ def _view_drawdown_composition(session: ResultsSession) -> None:
     table.add_column("Non-offset drawn", justify="right", style=THEME_COLOR)
     table.add_column("CGT paid", justify="right", style=THEME_COLOR)
 
-    for i, age in enumerate(ages):
-        if i >= len(r.offset_drawn_p50):
-            break
+    # M15 fix: guard by minimum length across all series
+    n_rows = min(len(ages), len(r.offset_drawn_p50), len(r.non_offset_drawn_p50), len(r.cgt_paid_p50))
+    for i in range(n_rows):
         off = r.offset_drawn_p50[i]
         non = r.non_offset_drawn_p50[i]
         cgt = r.cgt_paid_p50[i]
-        if off == 0 and non == 0 and cgt == 0 and i < len(ages) - 1:
+        if off == 0 and non == 0 and cgt == 0 and i < n_rows - 1:
             # Skip years with no drawdown activity (after early mortgage paydown etc.)
             # Still show the last year for completeness
             continue
         table.add_row(
-            str(age),
+            str(ages[i]),
             _fmt_dollar(off),
             _fmt_dollar(non),
             _fmt_dollar(cgt),
@@ -2115,13 +2189,52 @@ def _view_drawdown_composition(session: ResultsSession) -> None:
 
     console.print(table)
 
-    # Summary totals
+    # Summary totals — use true per-trial quantiles when available (M4b)
     console.print()
-    console.print(
-        f"  [bold]Total (median):[/] Offset: {_fmt_dollar(total_offset)}"
-        f"  |  Non-offset: {_fmt_dollar(total_non_offset)}"
-        f"  |  CGT paid: {_fmt_dollar(total_cgt)}"
-    )
+    # Defensive: B2 is adding per-trial total fields to SimulationResults.
+    # Use getattr with defaults so this works before and after B2 lands.
+    offset_total_p5 = getattr(r, "offset_drawn_total_p5", 0.0)
+    offset_total_p50 = getattr(r, "offset_drawn_total_p50", 0.0)
+    offset_total_p95 = getattr(r, "offset_drawn_total_p95", 0.0)
+    non_offset_total_p5 = getattr(r, "non_offset_drawn_total_p5", 0.0)
+    non_offset_total_p50 = getattr(r, "non_offset_drawn_total_p50", 0.0)
+    non_offset_total_p95 = getattr(r, "non_offset_drawn_total_p95", 0.0)
+    cgt_total_p5 = getattr(r, "cgt_paid_total_p5", 0.0)
+    cgt_total_p50 = getattr(r, "cgt_paid_total_p50", 0.0)
+    cgt_total_p95 = getattr(r, "cgt_paid_total_p95", 0.0)
+
+    has_per_trial = offset_total_p50 != 0.0 or non_offset_total_p50 != 0.0 or cgt_total_p50 != 0.0
+    if has_per_trial:
+        # True quantiles of per-trial totals
+        console.print(
+            "  [bold]Total across bridge (per-trial quantiles, today's dollars):[/]"
+        )
+        console.print(
+            f"    Offset drawn:     P5 {_fmt_dollar(offset_total_p5)}"
+            f"  |  Median {_fmt_dollar(offset_total_p50)}"
+            f"  |  P95 {_fmt_dollar(offset_total_p95)}"
+        )
+        console.print(
+            f"    Non-offset drawn: P5 {_fmt_dollar(non_offset_total_p5)}"
+            f"  |  Median {_fmt_dollar(non_offset_total_p50)}"
+            f"  |  P95 {_fmt_dollar(non_offset_total_p95)}"
+        )
+        console.print(
+            f"    CGT paid:         P5 {_fmt_dollar(cgt_total_p5)}"
+            f"  |  Median {_fmt_dollar(cgt_total_p50)}"
+            f"  |  P95 {_fmt_dollar(cgt_total_p95)}"
+        )
+    else:
+        # Fallback: sum of per-year medians (explicit label, not "median")
+        total_offset = sum(r.offset_drawn_p50)
+        total_non_offset = sum(r.non_offset_drawn_p50)
+        total_cgt = sum(r.cgt_paid_p50)
+        console.print(
+            f"  [bold]Total (sum of per-year medians — not a true quantile):[/]"
+            f" Offset: {_fmt_dollar(total_offset)}"
+            f"  |  Non-offset: {_fmt_dollar(total_non_offset)}"
+            f"  |  CGT paid: {_fmt_dollar(total_cgt)}"
+        )
     console.print()
     console.print(
         "  [dim]CGT is charged only on real (CPI-indexed) gains, not on the full"
@@ -2135,7 +2248,8 @@ def _view_cgt_breakdown(session: ResultsSession) -> None:
 
     Shows CGT paid with the 30% minimum rate floor vs the counterfactual
     without the floor, by year. Quantifies the dollar impact of the
-    Phase 2 CGT reform.
+    Phase 2 CGT reform.  Summary uses true per-trial quantiles when
+    available (M4b), otherwise falls back to sum-of-per-year-medians.
     """
     r = session.results
     ages = r.bridge_by_age_ages
@@ -2144,11 +2258,7 @@ def _view_cgt_breakdown(session: ResultsSession) -> None:
         console.print(f"  [bold {THEME_COLOR_WARN}]No CGT breakdown data available.[/]")
         return
 
-    total_with_floor = sum(r.cgt_paid_p50)
-    total_without_floor = sum(r.cgt_without_floor_p50)
-    floor_cost = total_with_floor - total_without_floor
-
-    # Per-year table
+    # Per-year table (unchanged — these are per-year medians)
     table = Table(
         title="CGT breakdown (median per year, nominal)",
         border_style=THEME_COLOR_ACCENT,
@@ -2159,9 +2269,9 @@ def _view_cgt_breakdown(session: ResultsSession) -> None:
     table.add_column("Without floor", justify="right", style=THEME_COLOR)
     table.add_column("Floor cost", justify="right", style=THEME_COLOR)
 
-    for i, age in enumerate(ages):
-        if i >= len(r.cgt_paid_p50):
-            break
+    # M15 fix: guard by minimum length across all series
+    n_rows = min(len(ages), len(r.cgt_paid_p50), len(r.cgt_without_floor_p50))
+    for i in range(n_rows):
         floor_cgt = r.cgt_paid_p50[i]
         no_floor_cgt = r.cgt_without_floor_p50[i]
         diff = floor_cgt - no_floor_cgt
@@ -2169,7 +2279,7 @@ def _view_cgt_breakdown(session: ResultsSession) -> None:
         if floor_cgt == 0 and no_floor_cgt == 0:
             continue
         table.add_row(
-            str(age),
+            str(ages[i]),
             _fmt_dollar(floor_cgt),
             _fmt_dollar(no_floor_cgt),
             _fmt_dollar(diff),
@@ -2177,25 +2287,70 @@ def _view_cgt_breakdown(session: ResultsSession) -> None:
 
     console.print(table)
 
-    # Summary
+    # Summary — use true per-trial quantiles when available (M4b)
     console.print()
-    if floor_cost > 0:
-        pct_increase = (floor_cost / total_without_floor * 100) if total_without_floor > 0 else 0.0
-        console.print(f"  [bold]Total CGT with 30% floor:[/] {_fmt_dollar(total_with_floor)}")
-        console.print(f"  [bold]Total CGT without floor:[/] {_fmt_dollar(total_without_floor)}")
+    # Defensive: B2 is adding per-trial total fields to SimulationResults.
+    cgt_total_p5 = getattr(r, "cgt_paid_total_p5", 0.0)
+    cgt_total_p50 = getattr(r, "cgt_paid_total_p50", 0.0)
+    cgt_total_p95 = getattr(r, "cgt_paid_total_p95", 0.0)
+    cgt_nofloor_p5 = getattr(r, "cgt_without_floor_total_p5", 0.0)
+    cgt_nofloor_p50 = getattr(r, "cgt_without_floor_total_p50", 0.0)
+    cgt_nofloor_p95 = getattr(r, "cgt_without_floor_total_p95", 0.0)
+    cgt_extra_p5 = getattr(r, "cgt_floor_extra_total_p5", 0.0)
+    cgt_extra_p50 = getattr(r, "cgt_floor_extra_total_p50", 0.0)
+    cgt_extra_p95 = getattr(r, "cgt_floor_extra_total_p95", 0.0)
+
+    has_per_trial = cgt_total_p50 != 0.0 or cgt_nofloor_p50 != 0.0
+    if has_per_trial:
+        # True quantiles of per-trial totals
+        console.print("  [bold]Total CGT across bridge (per-trial quantiles, today's dollars):[/]")
         console.print(
-            f"  [bold]Extra CGT from 30% minimum rate:[/] {_fmt_dollar(floor_cost)}"
-            f"  ({pct_increase:.1f}% increase)"
+            f"    With 30% floor:    P5 {_fmt_dollar(cgt_total_p5)}"
+            f"  |  Median {_fmt_dollar(cgt_total_p50)}"
+            f"  |  P95 {_fmt_dollar(cgt_total_p95)}"
         )
         console.print(
-            "  [dim](vs what you'd pay at your standard marginal rate,"
-            " without the 30% minimum floor)[/]"
+            f"    Without floor:     P5 {_fmt_dollar(cgt_nofloor_p5)}"
+            f"  |  Median {_fmt_dollar(cgt_nofloor_p50)}"
+            f"  |  P95 {_fmt_dollar(cgt_nofloor_p95)}"
         )
+        # Per-trial difference (true quantile of the extra CGT)
+        console.print(
+            f"    Extra from floor:  P5 {_fmt_dollar(cgt_extra_p5)}"
+            f"  |  Median {_fmt_dollar(cgt_extra_p50)}"
+            f"  |  P95 {_fmt_dollar(cgt_extra_p95)}"
+        )
+        if cgt_extra_p50 > 0:
+            pct_increase = (
+                cgt_extra_p50 / cgt_nofloor_p50 * 100
+                if cgt_nofloor_p50 > 0
+                else 0.0
+            )
+            console.print(
+                f"  [dim](median extra CGT = {pct_increase:.1f}% increase over"
+                f" marginal-rate-only)[/]"
+            )
     else:
-        console.print(
-            "  [dim]The 30% CGT floor had no effect in this scenario"
-            " (marginal rates were already above 30% or no CGT was triggered).[/]"
-        )
+        # Fallback: sum of per-year medians (explicit label)
+        total_with_floor = sum(r.cgt_paid_p50)
+        total_without_floor = sum(r.cgt_without_floor_p50)
+        floor_cost = total_with_floor - total_without_floor
+        if floor_cost > 0:
+            pct_increase = (floor_cost / total_without_floor * 100) if total_without_floor > 0 else 0.0
+            console.print(
+                "  [bold]Total CGT (sum of per-year medians — not a true quantile):[/]"
+            )
+            console.print(f"    With 30% floor: {_fmt_dollar(total_with_floor)}")
+            console.print(f"    Without floor:  {_fmt_dollar(total_without_floor)}")
+            console.print(
+                f"    Extra from floor: {_fmt_dollar(floor_cost)}"
+                f"  ({pct_increase:.1f}% increase)"
+            )
+        else:
+            console.print(
+                "  [dim]The 30% CGT floor had no effect in this scenario"
+                " (marginal rates were already above 30% or no CGT was triggered).[/]"
+            )
 
 
 def _view_scenario_comparison(session: ResultsSession) -> None:
@@ -2231,10 +2386,11 @@ def _view_scenario_comparison(session: ResultsSession) -> None:
 
     base_p = session.results.p_success
     base_p5 = session.results.bridge_p5
+    base_n = session.results.trials
 
     console.print()
     table = Table(
-        title=f"Scenario comparison ({session.inputs.n_iterations:,} trials base)",
+        title=f"Scenario comparison ({base_n:,} trials base)",
         border_style=THEME_COLOR_ACCENT,
         box=None,
     )
@@ -2243,27 +2399,46 @@ def _view_scenario_comparison(session: ResultsSession) -> None:
     table.add_column("P5 bridge", justify="right", style=THEME_COLOR)
     table.add_column("vs base", justify="right", style=THEME_COLOR)
 
-    # Base row
+    # Base row with Wilson interval
+    base_lo, base_hi = _wilson_interval(base_p, base_n)
     table.add_row(
         "Current plan",
-        f"{base_p * 100:.2f}%",
+        f"{base_p * 100:.1f}% [{base_lo * 100:.1f}\u2013{base_hi * 100:.1f}]",
         _fmt_dollar(base_p5),
         "\u2014",
     )
 
+    # Paired noise band: SE of the difference between two proportions.
+    # Scenarios run at 10,000 trials; base runs at n_iterations.  Use the
+    # smaller of the two for a conservative bound.
+    scen_n = 10_000
+    # Pooled SE approximation for paired comparisons (common random numbers
+    # reduce the actual SE, but we use the independent-sample bound to be safe).
+    noise_se = math.sqrt(base_p * (1 - base_p) / base_n + base_p * (1 - base_p) / scen_n)
+    noise_band = 1.96 * noise_se * 100  # 95% CI half-width in percentage points
+
     for label, r in scens.items():
         diff = (r.p_success - base_p) * 100
-        diff_str = f"{diff:+.2f}pp" if abs(diff) > 0.01 else "\u2014"
+        # Suppress differences inside the noise band (H8b).
+        if abs(diff) < noise_band:
+            diff_str = "\u2014 (within noise)"
+        else:
+            diff_str = f"{diff:+.1f}pp"
+        # Add Wilson interval for the scenario
+        scen_lo, scen_hi = _wilson_interval(r.p_success, scen_n)
         table.add_row(
             label,
-            f"{r.p_success * 100:.2f}%",
+            f"{r.p_success * 100:.1f}% [{scen_lo * 100:.1f}\u2013{scen_hi * 100:.1f}]",
             _fmt_dollar(r.bridge_p5),
             diff_str,
         )
 
     console.print(table)
     console.print()
-    console.print(f"  [dim]Note: scenarios run at {10_000:,} trials each for speed.[/]")
+    console.print(
+        f"  [dim]Note: scenarios run at {scen_n:,} trials each.  Differences"
+        f" inside the paired noise band (\u00b1{noise_band:.2f}pp) are suppressed.[/]"
+    )
 
 
 def _view_retirement_search(session: ResultsSession) -> None:
@@ -2291,6 +2466,7 @@ def _view_retirement_search(session: ResultsSession) -> None:
                 household=session.household,
                 inputs=session.inputs,
                 seed=session.inputs.seed,
+                success_threshold=session.inputs.success_threshold,
             )
             session.retirement_search_all = rs
 
@@ -2327,6 +2503,7 @@ def _view_retirement_search(session: ResultsSession) -> None:
                     inputs=session.inputs,
                     seed=session.inputs.seed,
                     mode="both_together",
+                    success_threshold=session.inputs.success_threshold,
                 )
                 session.retirement_search_all = rs
 
@@ -2338,7 +2515,7 @@ def _view_retirement_search(session: ResultsSession) -> None:
         console.print(f"  [{THEME_COLOR_BRIGHT}]Which earner to optimise?[/]")
         for i, e in enumerate(earners):
             console.print(
-                f"    [{THEME_COLOR}]{i + 1}.[/] {e.label}"
+                f"    [{THEME_COLOR}]{i + 1}.[/] {escape(e.label)}"
                 f" (currently retires at {e.retirement_age})"
             )
         earner_choice = _prompt_int("  Choice", default=1, lo=1, hi=len(earners))
@@ -2351,9 +2528,9 @@ def _view_retirement_search(session: ResultsSession) -> None:
             pass  # use cached
         else:
             fixed_info = [
-                f"{e.label} at {e.retirement_age}" for i, e in enumerate(earners) if i != target_idx
+                f"{escape(e.label)} at {e.retirement_age}" for i, e in enumerate(earners) if i != target_idx
             ]
-            console.print(f"  [dim]Searching for earliest retirement age for {target_label}...[/]")
+            console.print(f"  [dim]Searching for earliest retirement age for {escape(target_label)}...[/]")
             console.print(f"  [dim]Others held fixed: {', '.join(fixed_info)}.[/]")
             if not _prompt_yn(
                 "Run search? This will run several full simulations and may take 2-3 minutes.",
@@ -2370,6 +2547,7 @@ def _view_retirement_search(session: ResultsSession) -> None:
                 seed=session.inputs.seed,
                 mode="per_earner",
                 target_earner_index=target_idx,
+                success_threshold=session.inputs.success_threshold,
             )
             session.retirement_search_per_earner[target_label] = rs
 
@@ -2392,11 +2570,11 @@ def _display_retirement_search_result(rs: RetirementSearchResult) -> None:
     # Show search-mode context
     if rs.mode == "per_earner" and rs.target_earner_label:
         fixed_parts = [
-            f"{label} at {age}"
+            f"{escape(label)} at {age}"
             for label, age in rs.entered_ages_by_earner.items()
             if label != rs.target_earner_label
         ]
-        console.print(f"  Searched: [bold]{rs.target_earner_label}[/] (others held fixed)")
+        console.print(f"  Searched: [bold]{escape(rs.target_earner_label)}[/] (others held fixed)")
         if fixed_parts:
             console.print(f"  Fixed: {'; '.join(fixed_parts)}")
         console.print(
@@ -2406,7 +2584,7 @@ def _display_retirement_search_result(rs: RetirementSearchResult) -> None:
     else:
         # both_together or single earner
         if len(rs.entered_ages_by_earner) > 1:
-            age_parts = [f"{label}: {age}" for label, age in rs.entered_ages_by_earner.items()]
+            age_parts = [f"{escape(label)}: {age}" for label, age in rs.entered_ages_by_earner.items()]
             console.print(f"  Current retirement ages: {'; '.join(age_parts)}")
         console.print(
             f"  Your entered retirement age: {rs.entered_age}"
@@ -2494,7 +2672,7 @@ def _view_mortgage_amortisation(session: ResultsSession) -> None:
 
         console.print()
         table = Table(
-            title=f"Mortgage amortisation \u2014 {mortgage.label} (nominal dollars)",
+            title=f"Mortgage amortisation \u2014 {escape(mortgage.label)} (nominal dollars)",
             border_style=THEME_COLOR_ACCENT,
             box=None,
         )

@@ -32,6 +32,7 @@ from __future__ import annotations
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 # Ensure the project is on sys.path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -140,7 +141,7 @@ def build_reference_household(
     )
 
 
-def run_deterministic() -> dict:
+def run_deterministic() -> dict[str, float]:
     """Run a single deterministic trial and return key metrics."""
     h = build_reference_household(retire_age=50, sell_uk=True)
     bridge_end_age = min(e.super_access_age for e in h.earners)
@@ -162,7 +163,7 @@ def run_deterministic() -> dict:
     }
 
 
-def run_monte_carlo_report(n_iterations: int = 5_000) -> dict:
+def run_monte_carlo_report(n_iterations: int = 5_000) -> dict[str, Any]:
     """Run a full Monte Carlo simulation and return summary stats."""
     h = build_reference_household(retire_age=50, sell_uk=True)
     inputs = SimulationInputs(

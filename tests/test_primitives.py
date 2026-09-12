@@ -11,7 +11,7 @@ import math
 import random
 
 import pytest
-
+from models import Ownership
 from primitives import (
     BRACKETS,
     CGT_FLOOR_RATE,
@@ -24,12 +24,25 @@ from primitives import (
     SUPER_EQ_CORR,
     SUPER_MEAN,
     SUPER_STD,
+    AssetHolding,
+    CostBaseLot,
     amortize_mortgage_monthly,
+    bracket_tax,
+    cgt_on_2027_disposal,
+    cgt_on_gain,
+    cgt_split_tax,
+    cgt_weighted_rate,
     consulting_net_income,
     generate_correlated_returns,
+    generate_correlated_triplet,
+    generate_mortgage_rate,
     handle_offset_overflow,
+    indexed_cost_base,
+    lito_offset,
+    mls_rate_for_income,
     sell_assets,
     tax,
+    validate_correlations,
 )
 
 # =============================================================================
@@ -91,9 +104,11 @@ class TestTax:
         ("income", "expected"),
         [
             (0, 0.0),
-            (18_200, 364.0),  # $0 income tax + 2% Medicare
-            (45_000, 5_188.0),  # 16c bracket + Medicare
-            (135_000, 33_988.0),  # 30c bracket + Medicare
+            # H7: no levy below the low-income threshold, so no tax at $18,200.
+            (18_200, 0.0),
+            # H7: 16c bracket ($4,288) less LITO ($325) plus full 2% Medicare.
+            (45_000, 4_863.0),
+            (135_000, 33_988.0),  # 30c bracket + Medicare (no LITO)
             (190_000, 55_438.0),  # 37c bracket + Medicare
             (300_000, 107_138.0),  # 45c bracket + Medicare
         ],
@@ -101,11 +116,22 @@ class TestTax:
     def test_known_incomes(self, income: float, expected: float) -> None:
         assert tax(income) == pytest.approx(expected, abs=0.01)
 
-    def test_medicare_on_all_income(self) -> None:
-        """Medicare levy is always 2% of total income."""
-        for inc in [10_000, 50_000, 200_000]:
-            medicare_component = tax(inc) - (tax(inc) - inc * MEDICARE)
-            assert medicare_component == pytest.approx(inc * MEDICARE, abs=0.01)
+    def test_medicare_full_rate_above_reduction(self) -> None:
+        """Above the low-income upper threshold the levy is the full 2%."""
+        for inc in [50_000, 200_000]:
+            assert tax(inc) - bracket_tax(inc) + lito_offset(inc) == pytest.approx(
+                inc * MEDICARE, abs=0.01
+            )
+
+    def test_medicare_reduced_for_low_income(self) -> None:
+        """H7: the low-income reduction cuts the levy below the full 2%."""
+        assert tax(18_200) == pytest.approx(0.0, abs=0.01)
+        # $30k: income tax $1,888 less LITO $700, plus 10% of the $1,989 excess.
+        assert tax(30_000) == pytest.approx(1_888.0 - 700.0 + 0.10 * (30_000 - 28_011), abs=0.01)
+
+    def test_negative_income_no_tax(self) -> None:
+        """H7: tax() must never return a negative amount."""
+        assert tax(-1_000) == 0.0
 
     def test_zero_income(self) -> None:
         assert tax(0) == 0.0
@@ -253,7 +279,7 @@ class TestSellAssets:
 
     def test_no_cgt_full_basis(self) -> None:
         """No CGT when cgt_on=False, full basis means no gain."""
-        asset: dict[str, float] = {"val": 1000.0, "basis": 1000.0}
+        asset: AssetHolding = {"val": 1000.0, "basis": 1000.0}
         remain, _tax, _nofloor = sell_assets(asset, 500.0, cgt_on=False)
         assert remain == pytest.approx(0.0, abs=0.01)
         assert asset["val"] == pytest.approx(500.0, abs=0.01)
@@ -261,7 +287,7 @@ class TestSellAssets:
 
     def test_with_cgt_partial_basis(self) -> None:
         """CGT applied on gain portion when basis < value."""
-        asset: dict[str, float] = {"val": 1000.0, "basis": 500.0}
+        asset: AssetHolding = {"val": 1000.0, "basis": 500.0}
         remain, _tax, _nofloor = sell_assets(asset, 500.0, cgt_on=True)
         assert remain == pytest.approx(0.0, abs=0.01)
         assert asset["val"] == pytest.approx(411.76, abs=0.01)
@@ -269,7 +295,7 @@ class TestSellAssets:
 
     def test_insufficient_assets(self) -> None:
         """If asset value < gross needed, sell all and return remaining need."""
-        asset: dict[str, float] = {"val": 100.0, "basis": 100.0}
+        asset: AssetHolding = {"val": 100.0, "basis": 100.0}
         remain, _tax, _nofloor = sell_assets(asset, 500.0, cgt_on=False)
         assert remain == pytest.approx(400.0, abs=0.01)
         assert asset["val"] == pytest.approx(0.0, abs=0.01)
@@ -277,13 +303,13 @@ class TestSellAssets:
 
     def test_zero_valued_asset(self) -> None:
         """Selling from a zero-valued asset does nothing."""
-        asset: dict[str, float] = {"val": 0.0, "basis": 0.0}
+        asset: AssetHolding = {"val": 0.0, "basis": 0.0}
         remain, _tax, _nofloor = sell_assets(asset, 500.0, cgt_on=True)
         assert remain == pytest.approx(500.0, abs=0.01)
 
     def test_negative_basis(self) -> None:
         """Edge case: negative basis should not cause issues."""
-        asset: dict[str, float] = {"val": 1000.0, "basis": -100.0}
+        asset: AssetHolding = {"val": 1000.0, "basis": -100.0}
         remain, _tax, _nofloor = sell_assets(asset, 500.0, cgt_on=True)
         # Should still sell and return some value
         assert remain >= 0
@@ -291,7 +317,7 @@ class TestSellAssets:
 
     def test_no_need(self) -> None:
         """No spending need: nothing is sold."""
-        asset: dict[str, float] = {"val": 1000.0, "basis": 500.0}
+        asset: AssetHolding = {"val": 1000.0, "basis": 500.0}
         remain, _tax, _nofloor = sell_assets(asset, 0.0, cgt_on=True)
         assert remain == pytest.approx(0.0, abs=0.01)
         assert asset["val"] == pytest.approx(1000.0, abs=0.01)
@@ -337,10 +363,12 @@ class TestAmortizeMortgageMonthly:
         m, o = amortize_mortgage_monthly(0.0, 0.0, 2_000.0, 0.005)
         assert m == 0.0
 
-    def test_high_rate_negative_amortisation_prevented(self) -> None:
-        """If interest > payment, only interest is paid (no principal reduction)."""
+    def test_high_rate_negative_amortisation_capitalised(self) -> None:
+        """M11: if interest > payment, the shortfall capitalises into the balance."""
         m, o = amortize_mortgage_monthly(100_000.0, 0.0, 200.0, 0.01)
-        assert m == pytest.approx(100_000.0, abs=0.01)  # principal unchanged
+        # $100k at 1%/mo with $200/mo: 100000*1.01^12 - 200*(1.01^12-1)/0.01.
+        assert m == pytest.approx(110_146.04, abs=0.5)
+        assert m > 100_000.0
 
 
 # =============================================================================
@@ -428,7 +456,7 @@ class TestCgtCostBaseIndexation:
     ) -> None:
         """When cumulative_inflation_factor=1.0 (no inflation),
         indexed_basis == nominal_basis, so result is identical."""
-        asset = {"val": 200_000.0, "basis": 100_000.0}
+        asset: AssetHolding = {"val": 200_000.0, "basis": 100_000.0}
         # Old behaviour (nominal gain): gain = 200k-100k = 100k, CGT=30k
         # New behaviour with factor=1.0: same
         remain, _tax, _nofloor = sell_assets(
@@ -456,7 +484,7 @@ class TestCgtCostBaseIndexation:
         """
         import copy
 
-        asset = {"val": 200_000.0, "basis": 100_000.0}
+        asset: AssetHolding = {"val": 200_000.0, "basis": 100_000.0}
         asset_old = copy.deepcopy(asset)
         asset_new = copy.deepcopy(asset)
 
@@ -511,7 +539,7 @@ class TestCgtCostBaseIndexation:
         Difference: $10,318 more with indexation.
         """
         inf_factor = (1.03) ** 10  # ≈ 1.3439
-        asset = {"val": 200_000.0, "basis": 100_000.0}
+        asset: AssetHolding = {"val": 200_000.0, "basis": 100_000.0}
         result, _tax, _nofloor = sell_assets(
             asset,
             200_000,
@@ -580,7 +608,7 @@ class TestSellAssetsPhase2:
         """Single owner (weighted_marginal_rate=0.30) with no indexation
         produces same result as old cgt_rate=0.30.
         """
-        asset = {"val": 200_000.0, "basis": 100_000.0}
+        asset: AssetHolding = {"val": 200_000.0, "basis": 100_000.0}
         remain, _tax, _nofloor = sell_assets(
             asset, 50_000, cgt_on=True, weighted_marginal_rate=0.30, cumulative_inflation_factor=1.0
         )
@@ -615,7 +643,7 @@ class TestSellAssetsPhase2:
         assert abs(weighted - 0.375) < 0.001, f"Expected 0.375, got {weighted}"
 
         # Now test through sell_assets
-        asset = {"val": 200_000.0, "basis": 100_000.0}
+        asset: AssetHolding = {"val": 200_000.0, "basis": 100_000.0}
         # Sell full asset
         result, _tax, _nofloor = sell_assets(
             asset,
@@ -655,7 +683,7 @@ class TestSellAssetsPhase2:
         inf_factor = (1.03) ** 10  # ≈ 1.3439
 
         # Phase 1 only (weighted_marginal_rate=0.30, old behaviour)
-        asset = {"val": 200_000.0, "basis": 100_000.0}
+        asset: AssetHolding = {"val": 200_000.0, "basis": 100_000.0}
         result_p1, _tax1, _nf1 = sell_assets(
             asset,
             200_000,
@@ -666,7 +694,7 @@ class TestSellAssetsPhase2:
         net_p1 = 200_000 - result_p1
 
         # Same scenario with Phase 2 floor at 37.5%
-        asset2 = {"val": 200_000.0, "basis": 100_000.0}
+        asset2: AssetHolding = {"val": 200_000.0, "basis": 100_000.0}
         result_p2, _tax2, _nf2 = sell_assets(
             asset2,
             200_000,
@@ -706,7 +734,7 @@ class TestOwnershipValidation:
             label="Joint",
             market_value=100_000,
             cost_basis=50_000,
-            ownership={0: 0.6, 1: 0.4},
+            ownership=Ownership({0: 0.6, 1: 0.4}),
         )
         assert abs(sum(acct.ownership.values()) - 1.0) < 0.001
 
@@ -752,7 +780,7 @@ class TestOwnershipValidation:
             label="Three-way",
             market_value=300_000,
             cost_basis=150_000,
-            ownership={0: 1 / 3, 1: 1 / 3, 2: 1 / 3},
+            ownership=Ownership({0: 1 / 3, 1: 1 / 3, 2: 1 / 3}),
         )
         assert abs(sum(acct.ownership.values()) - 1.0) < 0.001
         for ei in (0, 1, 2):
@@ -766,7 +794,7 @@ class TestOwnershipValidation:
             label="Split",
             market_value=300_000,
             cost_basis=150_000,
-            ownership={0: 0.5, 1: 0.3, 2: 0.2},
+            ownership=Ownership({0: 0.5, 1: 0.3, 2: 0.2}),
         )
         assert abs(sum(acct.ownership.values()) - 1.0) < 0.001
 
@@ -783,7 +811,7 @@ class TestOwnershipValidation:
             label="E1+E2 only",
             market_value=200_000,
             cost_basis=100_000,
-            ownership={0: 0.0, 1: 0.7, 2: 0.3},
+            ownership=Ownership({0: 0.0, 1: 0.7, 2: 0.3}),
         )
         assert abs(sum(acct.ownership.values()) - 1.0) < 0.001
         assert acct.ownership[0] == 0.0
@@ -850,7 +878,7 @@ class TestOwnershipValidation:
         assert abs(weighted - 0.345) < 0.001, f"Expected 0.345, got {weighted}"
 
         # Now test through sell_assets
-        asset = {"val": 200_000.0, "basis": 100_000.0}
+        asset: AssetHolding = {"val": 200_000.0, "basis": 100_000.0}
         result, _tax, _nofloor = sell_assets(
             asset,
             200_000,
@@ -955,7 +983,7 @@ class TestPrimitivesCleanliness:
 
     def test_no_simulation_state_import(self) -> None:
         """primitives.py must not import SimulationState."""
-        import primitives as p  # type: ignore[import-unclear]
+        import primitives as p
 
         source = p.__file__
         assert source is not None
@@ -966,3 +994,117 @@ class TestPrimitivesCleanliness:
         assert "salary_w" not in content
         assert "super_h" not in content
         assert "super_w" not in content
+
+
+# =============================================================================
+# M13 — COVERAGE FOR PREVIOUSLY UNTESTED HEADLINE PATHS
+# =============================================================================
+
+
+class TestMlsTiers:
+    """Medicare Levy Surcharge tiers (H7, FY2026-27)."""
+
+    def test_singles_tiers(self) -> None:
+        assert mls_rate_for_income(100_000, 1) == 0.0
+        assert mls_rate_for_income(110_000, 1) == 0.01
+        assert mls_rate_for_income(130_000, 1) == 0.0125
+        assert mls_rate_for_income(200_000, 1) == 0.015
+
+    def test_family_tiers_and_child_uplift(self) -> None:
+        assert mls_rate_for_income(200_000, 2) == 0.0
+        assert mls_rate_for_income(220_000, 2) == 0.01
+        assert mls_rate_for_income(250_000, 2) == 0.0125
+        # Two children lifts the family base by $1,500 over the one-child base.
+        assert mls_rate_for_income(211_000, 2, n_children=2) == 0.0
+        assert mls_rate_for_income(212_000, 2, n_children=2) == 0.01
+
+
+class TestMortgageRate:
+    """Black-Karasinski rate generation (M13)."""
+
+    def test_rate_stays_positive(self) -> None:
+        random.seed(1)
+        rate = 0.06
+        for _ in range(150):
+            rate = generate_mortgage_rate(rate, eq_z=0.0)
+            assert rate > 0.0
+
+    def test_mean_reversion_drifts_towards_theta(self) -> None:
+        random.seed(3)
+        draws = [generate_mortgage_rate(0.02, theta=0.065, kappa=0.2) for _ in range(500)]
+        assert sum(draws) / len(draws) > 0.02
+
+    def test_seeded_reproducible(self) -> None:
+        random.seed(7)
+        a = [generate_mortgage_rate(0.06, eq_z=0.0) for _ in range(5)]
+        random.seed(7)
+        b = [generate_mortgage_rate(0.06, eq_z=0.0) for _ in range(5)]
+        assert a == b
+
+
+class TestCorrelatedTriplet:
+    """3x3 Cholesky triplet and its validation (M12, M13)."""
+
+    def test_shapes(self) -> None:
+        random.seed(11)
+        (eq_r, eq_z), (super_r, super_z), inf_r = generate_correlated_triplet()
+        assert eq_r > -1.0
+        assert super_r > -1.0
+        assert inf_r > -1.0
+        assert isinstance(eq_z, float) and isinstance(super_z, float)
+
+    def test_validation_rejects_out_of_range(self) -> None:
+        with pytest.raises(ValueError):
+            generate_correlated_triplet(rho_se=1.5)
+
+    def test_validation_rejects_non_psd(self) -> None:
+        with pytest.raises(ValueError):
+            validate_correlations(0.9, 0.9, -0.9)
+
+    def test_validation_accepts_singular_guard(self) -> None:
+        with pytest.raises(ValueError):
+            validate_correlations(1.0, 0.0, 0.0)
+
+
+class TestCgtMachinery:
+    """H5/H6 CGT helpers (M13)."""
+
+    def test_stacking_matches_slice_tax(self) -> None:
+        _tax, rate = cgt_on_gain(134_000, 50_000)
+        assert rate == pytest.approx(0.3686, abs=1e-4)
+
+    def test_floor_binds_below_thirty_percent_marginal(self) -> None:
+        _tax, rate = cgt_on_gain(20_000, 10_000)
+        assert rate == pytest.approx(0.30, abs=1e-9)
+
+    def test_weighted_rate_uses_each_owner_income(self) -> None:
+        single = cgt_on_gain(134_000, 100_000)[1]
+        split = cgt_weighted_rate([(134_000, 0.5), (45_000, 0.5)], 100_000)[0]
+        assert split < single
+
+    def test_lot_indexation_from_incurrence_date(self) -> None:
+        infl = [1.0, 1.1, 1.2]
+        lots: list[CostBaseLot] = [
+            {"basis": 100.0, "incurred": 0},
+            {"basis": 100.0, "incurred": 1},
+        ]
+        expected = 100.0 * 1.2 + 100.0 * 1.2 / 1.1
+        assert indexed_cost_base(lots, 2, infl) == pytest.approx(expected)
+
+    def test_no_stacking_of_discount_and_indexation(self) -> None:
+        total, without_floor, _rate = cgt_on_2027_disposal(
+            100_000, pre_reform_gain=100_000, post_reform_gain=0.0
+        )
+        # Pre-reform portion only: assessable gain is 50% of the nominal gain.
+        assert total == pytest.approx(bracket_tax(150_000) - bracket_tax(100_000))
+        assert total == without_floor
+        assert cgt_split_tax([(100_000, 1.0)], 100_000.0, 0.0)[0] == pytest.approx(total)
+
+
+class TestSgConstants:
+    """FY2026-27 Super Guarantee maximum base (H7)."""
+
+    def test_sg_max_base(self) -> None:
+        from config import SG_MAX_BASE
+
+        assert SG_MAX_BASE == 270_830.0

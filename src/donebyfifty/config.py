@@ -19,14 +19,15 @@ import primitives as _prim
 # =============================================================================
 
 CONC_CAP: Final[float] = 32_500.0  # annual concessional contributions cap
-SG_MAX_BASE: Final[float] = 260_000.0  # max salary base for Super Guarantee
+SG_MAX_BASE: Final[float] = 270_830.0  # max salary base for Super Guarantee (FY2026-27)
 SUPER_TAX_ON_CONTRIBUTIONS: Final[float] = 0.15  # 15% tax on contributions in fund
 DIV293_THRESHOLD: Final[float] = 250_000.0  # Division 293 income threshold
 DIV293_RATE: Final[float] = 0.15  # Division 293 additional tax rate
 
 # Default indexation rates for policy parameters (used in UI warnings)
 DEFAULT_CONC_CAP_GROWTH_RATE: Final[float] = 0.03  # annual growth for concessional cap
-DEFAULT_DIV293_GROWTH_RATE: Final[float] = 0.025  # DEPRECATED — Div 293 threshold is statutory, not indexed
+# DEPRECATED — Div 293 threshold is statutory, not indexed.
+DEFAULT_DIV293_GROWTH_RATE: Final[float] = 0.025
 
 # =============================================================================
 # TAX CACHE CLEARING
@@ -40,6 +41,9 @@ def clear_tax_cache() -> None:
     stale bracket-indexed entries from leaking across runs.
     """
     _prim.PT_TAX_CALC_CACHE.clear()
+
+
+# MLS tiers live in primitives.py (single source of truth alongside BRACKETS).
 
 
 # =============================================================================

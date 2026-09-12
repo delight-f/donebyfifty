@@ -6,18 +6,107 @@ frozen (immutable) to prevent accidental mutation.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Iterator, NewType, TypeVar, overload
+
+_T = TypeVar("_T")
 
 if TYPE_CHECKING:
     from simulation import ScenarioComparisonResult
+
+# =============================================================================
+# UNIT TYPES — documentation-only NewTypes for clarity
+# =============================================================================
+
+Percent = NewType("Percent", float)
+"""A percentage stored on a 0–100 scale (e.g. 70.0 means 70%)."""
+
+Rate = NewType("Rate", float)
+"""A rate stored as a decimal (e.g. 0.005 means 0.5%)."""
+
+
+# =============================================================================
+# OWNERSHIP — immutable, hashable mapping of earner index → share
+# =============================================================================
+
+
+class Ownership(Mapping[int, float]):
+    """Immutable, hashable fractional ownership of an investment account.
+
+    A ``Mapping[int, float]`` that cannot be mutated after construction and
+    whose ``__hash__`` is well-defined (the ``frozen`` dataclass generator
+    raises ``TypeError`` on a plain ``dict`` field, which previously made
+    ``InvestmentAccount`` and ``Household`` unhashable).
+
+    All read paths used elsewhere — ``.get(key, default)``, ``.items()``,
+    ``[key]``, iteration, ``len`` — work unchanged.
+    """
+
+    __slots__ = ("_data", "_hash")
+
+    def __init__(self, data: Mapping[int, float] | dict[int, float]) -> None:
+        # Store as a tuple of sorted (key, value) pairs so hashing is stable.
+        self._data: tuple[tuple[int, float], ...] = tuple(sorted(data.items()))
+        self._hash: int = hash(self._data)
+
+    def __getitem__(self, key: int) -> float:
+        """Return the share for earner ``key``."""
+        for k, v in self._data:
+            if k == key:
+                return v
+        raise KeyError(key)
+
+    @overload
+    def get(self, key: int) -> float | None: ...
+
+    @overload
+    def get(self, key: int, default: float) -> float: ...
+
+    @overload
+    def get(self, key: int, default: _T) -> float | _T: ...
+
+    def get(self, key: int, default: float | _T | None = None) -> float | _T | None:
+        """Return the share for earner ``key``, or ``default`` if absent."""
+        for k, v in self._data:
+            if k == key:
+                return v
+        return default
+
+    def __iter__(self) -> Iterator[int]:
+        """Iterate over earner indices."""
+        return iter(k for k, _ in self._data)
+
+    def __len__(self) -> int:
+        """Return number of earners with ownership shares."""
+        return len(self._data)
+
+    def __hash__(self) -> int:
+        """Hash based on the sorted (key, value) pairs."""
+        return self._hash
+
+    def __eq__(self, other: object) -> bool:
+        """Equality compares the underlying (key, value) pairs."""
+        if isinstance(other, Ownership):
+            return self._data == other._data
+        if isinstance(other, Mapping):
+            return dict(self._data) == dict(other)
+        return NotImplemented
+
+    def __repr__(self) -> str:
+        """Return repr string."""
+        return f"Ownership({dict(self._data)})"
+
+    def to_dict(self) -> dict[int, float]:
+        """Return a plain dict copy for serialisation."""
+        return dict(self._data)
 
 # =============================================================================
 # AUSTRALIAN PRESERVATION AGE LOOKUP
 # =============================================================================
 
 
-def preservation_age(birth_year: int) -> int:
+def preservation_age(birth_year: int, birth_month: int | None = None) -> int:
     """Return the Australian superannuation preservation age for a birth year.
 
     Preservation age is the minimum age at which a person can access their
@@ -26,40 +115,64 @@ def preservation_age(birth_year: int) -> int:
 
     Args:
         birth_year: Calendar year of birth (e.g. 1970).
+        birth_month: Month of birth (1–12).  If ``None`` (default), the
+            function returns the **conservative** (higher) preservation age
+            for the ambiguous 1960–1964 cohorts, so the model errs in its
+            documented conservative direction.  When supplied, the exact
+            preservation age for that birth date is returned.
 
     Returns:
         Preservation age (55–60).
 
     Raises:
-        ValueError: If birth_year is before 1900 or after 2100.
+        ValueError: If ``birth_year`` is before 1900 or after 2100, or if
+            ``birth_month`` is not in 1–12.
 
     Note:
-        Preservation age depends on **date** of birth, not just year. The
-        function uses a calendar-year approximation: everyone born in year
-        *X* is assigned the preservation age that applies from 1 July of
-        that year. A person born in December 1960 (actual preservation age
-        56) would be reported as 55. This is a known simplification — see
-        O4 in the audit findings.
+        The statutory table keys off the fiscal year: a person born on
+        1 July 1960 has preservation age 56, while one born on 30 June
+        1960 has preservation age 55.  When the month is unknown, the
+        default is the **higher** (more conservative) of the two possible
+        ages for that calendar year, so the model does not silently bias
+        ``p_success`` optimisticly for July–December births in the
+        1960–1964 transition window.
 
     """
     if birth_year < 1900 or birth_year > 2100:
         raise ValueError(f"birth_year {birth_year} out of supported range (1900–2100)")
-    # Calendar-year approximation of the fiscal-year preservation age table.
-    # Treats the whole of year X as if born before 1 July of year X+1,
-    # which is the standard approximation when month of birth is unknown.
+    if birth_month is not None and (birth_month < 1 or birth_month > 12):
+        raise ValueError(f"birth_month {birth_month} out of range (1–12)")
+
+    if birth_month is not None:
+        # Exact calculation: preservation age changes at 1 July of each year.
+        # Born before 1 July 1960 → 55; 1 Jul 1960 – 30 Jun 1961 → 56; etc.
+        fiscal_year_start = birth_year if birth_month >= 7 else birth_year - 1
+        if fiscal_year_start < 1960:
+            return 55
+        if fiscal_year_start < 1961:
+            return 56
+        if fiscal_year_start < 1962:
+            return 57
+        if fiscal_year_start < 1963:
+            return 58
+        if fiscal_year_start < 1964:
+            return 59
+        return 60
+
+    # Month unknown: default to the conservative (higher) age for the
+    # ambiguous 1960–1964 cohorts.  A July–December birth in year X has
+    # the same preservation age as a January–June birth in year X+1.
     if birth_year < 1960:
         return 55
     if birth_year < 1961:
-        return 55
+        return 56  # Was 55: Jul–Dec 1960 is actually 56
     if birth_year < 1962:
-        return 56
+        return 57  # Was 56: Jul–Dec 1961 is actually 57
     if birth_year < 1963:
-        return 57
+        return 58  # Was 57: Jul–Dec 1962 is actually 58
     if birth_year < 1964:
-        return 58
-    if birth_year < 1965:
-        return 59
-    return 60
+        return 59  # Was 58: Jul–Dec 1963 is actually 59
+    return 60  # >= 1964: Jul–Dec 1964 is 60, and all later years are 60
 
 
 # =============================================================================
@@ -254,6 +367,27 @@ class Earner:
         # Resolve pt_end_age sentinel: 0 means "follow super_access_age"
         if self.pt_end_age == 0:
             object.__setattr__(self, "pt_end_age", self.super_access_age)
+        # Unit validation: _pct fields are 0–100, _rate fields are ≥ -1.0.
+        # Bounds are chosen to accept every value the UI can produce; see
+        # ui.py prompt ranges (salary_growth -5..15%, sg 0..20%, etc.).
+        if not 0.0 <= self.super_growth_pct <= 100.0:
+            raise ValueError(
+                f"super_growth_pct must be 0–100 (got {self.super_growth_pct})"
+            )
+        if not 0.0 <= self.super_glide_target_pct <= 100.0:
+            raise ValueError(
+                f"super_glide_target_pct must be 0–100 (got {self.super_glide_target_pct})"
+            )
+        if self.salary_growth_rate < -1.0:
+            raise ValueError(
+                f"salary_growth_rate must be ≥ -1.0 (got {self.salary_growth_rate})"
+            )
+        if self.self_employed_growth_rate < -1.0:
+            raise ValueError(
+                f"self_employed_growth_rate must be ≥ -1.0 (got {self.self_employed_growth_rate})"
+            )
+        if not 0.0 <= self.sg_rate <= 1.0:
+            raise ValueError(f"sg_rate must be 0–1 (got {self.sg_rate})")
 
 
 @dataclass(frozen=True)
@@ -394,17 +528,49 @@ class InvestmentAccount:
     deterministic rate.  For example, an equity account with
     ``interest_rate=0.08`` gets ~8% expected return with ~15% volatility.
     """
-    ownership: dict[int, float] = field(default_factory=lambda: {0: 1.0})
+    ownership: Ownership = field(default_factory=lambda: Ownership({0: 1.0}))
     """Fractional ownership per earner index (matches ``Household.earners`` tuple).
 
-    Key = earner index in ``Household.earners``, value = ownership share (0.0–1.0).
-    Must sum to 1.0.  Default ``{0: 1.0}`` = 100% to Earner 1, which preserves
-    pre-Phase-2 behaviour and provides a safe default for single-earner households.
+    An immutable, hashable :class:`Ownership` mapping of earner index → share.
+    Shares must sum to 1.0 (±0.001).  Default ``{0: 1.0}`` = 100% to Earner 1,
+    which preserves pre-Phase-2 behaviour and provides a safe default for
+    single-earner households.
 
     Ownership indices are stable across a simulation trial — the earner tuple
     order is invariant, matching the indexing of ``super_balances[]``,
     ``earner_taxable_incomes[]``, etc.
     """
+
+    def __post_init__(self) -> None:
+        """Validate ownership invariants and unit ranges at construction."""
+        # Coerce a plain dict to Ownership (e.g. from deserialisation).
+        if not isinstance(self.ownership, Ownership):
+            object.__setattr__(self, "ownership", Ownership(self.ownership))
+        total = sum(self.ownership.values())
+        if abs(total - 1.0) > 0.001:
+            raise ValueError(
+                f"Account '{self.label}' ownership shares sum to {total:.4f}, "
+                f"expected 1.0.  Each account's ownership shares must sum to "
+                f"exactly 100%."
+            )
+        for ei, share in self.ownership.items():
+            if ei < 0:
+                raise ValueError(
+                    f"Account '{self.label}' has negative earner index {ei}."
+                )
+            if share < 0:
+                raise ValueError(
+                    f"Account '{self.label}' has negative share {share} for "
+                    f"earner {ei}."
+                )
+        # Unit validation: _rate fields are 0–1.0.  Bounds accept every value
+        # the UI can produce (interest_rate 0–20%, cgt_rate 0.30, fee_rate 0).
+        if not 0.0 <= self.cgt_rate <= 1.0:
+            raise ValueError(f"cgt_rate must be 0–1 (got {self.cgt_rate})")
+        if not 0.0 <= self.fee_rate <= 1.0:
+            raise ValueError(f"fee_rate must be 0–1 (got {self.fee_rate})")
+        if not 0.0 <= self.interest_rate <= 1.0:
+            raise ValueError(f"interest_rate must be 0–1 (got {self.interest_rate})")
 
 
 @dataclass(frozen=True)
@@ -456,6 +622,12 @@ class SimulationInputs:
     n_iterations: int = 5_000
     inflation: float = 0.025
     simulation_start_age: int = 37
+    simulation_start_year: int = 2026
+    """Calendar year in which simulation year 0 falls.
+
+    Anchors the model to the real calendar so date-based tax rules (the
+    30 June 2027 CGT reform line) can be located in simulation time.
+    """
     cgt_on_drawdowns: bool = True
     sell_strategy: str = "waterfall"
     sell_order: tuple[str, ...] = ()
@@ -514,6 +686,39 @@ class SimulationInputs:
     success_threshold: float = 0.95
     """Target success probability (e.g. 0.90 for 90%). Used to highlight
     results as meeting/not-meeting the user's risk tolerance."""
+
+    def __post_init__(self) -> None:
+        """Validate unit ranges on percent and rate fields."""
+        # _pct fields: 0–100.  _rate fields: 0–1.0.  Bounds accept every
+        # value the UI can produce.
+        if not 0.0 <= self.surplus_investment_pct <= 100.0:
+            raise ValueError(
+                f"surplus_investment_pct must be 0–100 (got {self.surplus_investment_pct})"
+            )
+        if not 0.0 <= self.inflation <= 1.0:
+            raise ValueError(f"inflation must be 0–1 (got {self.inflation})")
+        if not 0.0 <= self.super_fee_rate <= 1.0:
+            raise ValueError(f"super_fee_rate must be 0–1 (got {self.super_fee_rate})")
+        if not 0.0 <= self.mls_rate <= 1.0:
+            raise ValueError(f"mls_rate must be 0–1 (got {self.mls_rate})")
+        if not 0.0 <= self.bracket_growth_rate <= 1.0:
+            raise ValueError(
+                f"bracket_growth_rate must be 0–1 (got {self.bracket_growth_rate})"
+            )
+        if not 0.0 <= self.div293_rate <= 1.0:
+            raise ValueError(f"div293_rate must be 0–1 (got {self.div293_rate})")
+        if not 0.0 <= self.div293_growth_rate <= 1.0:
+            raise ValueError(
+                f"div293_growth_rate must be 0–1 (got {self.div293_growth_rate})"
+            )
+        if not 0.0 <= self.conc_cap_growth_rate <= 1.0:
+            raise ValueError(
+                f"conc_cap_growth_rate must be 0–1 (got {self.conc_cap_growth_rate})"
+            )
+        if not 0.0 <= self.sg_max_base_growth_rate <= 1.0:
+            raise ValueError(
+                f"sg_max_base_growth_rate must be 0–1 (got {self.sg_max_base_growth_rate})"
+            )
 
 
 @dataclass(frozen=True)
@@ -827,12 +1032,43 @@ class Profile:
         """Deserialise profile from a JSON dict.
 
         Handles backward compatibility with v1 (legacy-specific) profiles.
+
+        Raises:
+            ValueError: If ``_version`` is present and greater than the
+                supported version (writes are rejected silently by other
+                code paths), or if the household deserialises to zero
+                earners (corrupt or silently downgraded v1 profile).
+
         """
+        # Validate the schema version up front so unknown/newer versions
+        # fail loudly instead of being silently misparsed as v2.
+        version = data.get("_version")
+        if version is not None and version > 2:
+            raise ValueError(
+                f"Profile '{data.get('profile_name', '?')}' uses schema "
+                f"version {version}, which is newer than this version of "
+                f"DoneByFifty supports (v2).  Upgrade the application "
+                f"before loading this profile."
+            )
+
         # Upgrade v1 if needed
         data = _upgrade_v1_profile(data)
 
         inputs_data = data.get("inputs", {})
         inputs = _deserialise_inputs(inputs_data) if inputs_data else SimulationInputs()
+
+        # A v1 profile whose detection field was absent would have been
+        # returned unchanged and then parsed as v2 with an empty earner
+        # tuple.  Reject that silently-emptied household rather than
+        # modelling a no-earner household.
+        if not inputs.household.earners:
+            raise ValueError(
+                f"Profile '{data.get('profile_name', '?')}' deserialised "
+                f"to a household with zero earners.  This usually means "
+                f"the profile is a v1 file missing its detection field "
+                f"and was silently misparsed as v2.  Edit the profile "
+                f"to restore its earners, or re-create it in the UI."
+            )
 
         results_data = data.get("last_results")
         last_results = SimulationResults.from_dict(results_data) if results_data else None
@@ -897,7 +1133,7 @@ def _deserialise_earner(data: dict[str, Any]) -> Earner:
         label=data.get("label", "Earner 1"),
         salary=data.get("salary", 100_000.0),
         super_balance=data.get("super_balance", 100_000.0),
-        salary_growth_rate=data.get("salary_growth_rate", 0.03),
+        salary_growth_rate=data.get("salary_growth_rate", 0.005),
         retirement_age=data.get("retirement_age", 50),
         birth_year=data.get("birth_year"),
         super_access_age=data.get("super_access_age", 60),
@@ -978,6 +1214,8 @@ def _deserialise_mortgage(data: dict[str, Any]) -> MortgageAccount:
 
 
 def _serialise_account(account: InvestmentAccount) -> dict[str, Any]:
+    # Ownership is stored as a dict of str(earner_index) → share for JSON.
+    # On load, _deserialise_account coerces it back to an Ownership.
     return {
         "label": account.label,
         "market_value": account.market_value,
@@ -994,9 +1232,9 @@ def _serialise_account(account: InvestmentAccount) -> dict[str, Any]:
 
 def _deserialise_account(data: dict[str, Any]) -> InvestmentAccount:
     raw_ownership = data.get("ownership", {"0": 1.0})
-    ownership = {int(k): v for k, v in raw_ownership.items()}
+    ownership_dict = {int(k): v for k, v in raw_ownership.items()}
     # Validate ownership sums to ~1.0 — hard-block if malformed
-    total = sum(ownership.values())
+    total = sum(ownership_dict.values())
     if abs(total - 1.0) > 0.001:
         raise ValueError(
             f"Account '{data.get('label', '?')}' ownership sums to {total:.4f}, "
@@ -1013,7 +1251,7 @@ def _deserialise_account(data: dict[str, Any]) -> InvestmentAccount:
         is_offset=data.get("is_offset", False),
         fee_rate=data.get("fee_rate", 0.0),
         interest_rate=data.get("interest_rate", 0.0),
-        ownership=ownership,
+        ownership=Ownership(ownership_dict),
     )
 
 
@@ -1022,6 +1260,7 @@ def _serialise_inputs(inputs: SimulationInputs) -> dict[str, Any]:
         "n_iterations": inputs.n_iterations,
         "inflation": inputs.inflation,
         "simulation_start_age": inputs.simulation_start_age,
+        "simulation_start_year": inputs.simulation_start_year,
         "cgt_on_drawdowns": inputs.cgt_on_drawdowns,
         "sell_strategy": inputs.sell_strategy,
         "sell_order": list(inputs.sell_order),
@@ -1158,6 +1397,7 @@ def _deserialise_inputs(data: dict[str, Any]) -> SimulationInputs:
         n_iterations=data.get("n_iterations", 5_000),
         inflation=data.get("inflation", 0.025),
         simulation_start_age=data.get("simulation_start_age", 37),
+        simulation_start_year=data.get("simulation_start_year", 2026),
         cgt_on_drawdowns=data.get("cgt_on_drawdowns", True),
         sell_strategy=data.get("sell_strategy", "waterfall"),
         sell_order=tuple(data.get("sell_order", [])),
@@ -1203,8 +1443,14 @@ def _upgrade_v1_profile(data: dict[str, Any]) -> dict[str, Any]:
     inputs = data.get("inputs", {})
     finances = inputs.get("finances", {})
 
-    # Heuristic: v1 has salary_h in finances
-    if "salary_h" not in finances:
+    # Robust v1 detection: require *multiple* v1-only fields.  Relying on
+    # a single field (e.g. salary_h) meant a v1 profile that happened to
+    # lack that one field was returned unchanged and then misparsed as
+    # v2 — silently producing an empty household.  The v1 schema always
+    # had salary_h, salary_w, super_h, super_w and living_expenses; a
+    # genuine v2 profile has none of these under inputs.finances.
+    v1_markers = ("salary_h", "salary_w", "super_h", "super_w", "living_expenses")
+    if not any(m in finances for m in v1_markers):
         return data  # Not a v1 profile (or no data at all)
 
     salary_h = finances.get("salary_h", 320_000.0)

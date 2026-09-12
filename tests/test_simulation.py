@@ -339,10 +339,10 @@ class TestEdgeCases:
         assert r.total_super > 180_000.0
 
     def test_no_mortgage_payment(self) -> None:
-        """Mortgage with monthly_payment=0 means no principal is paid.
+        """Mortgage with monthly_payment=0 capitalises the unpaid interest.
 
-        With no payment, interest is unpaid but principal stays flat
-        (negative amortisation is prevented).
+        M11: with no payment the balance grows by the interest each month
+        (negative amortisation is capitalised, not waived).
         """
         h = Household(
             earners=(Earner(salary=200_000.0, super_balance=100_000.0),),
@@ -368,8 +368,8 @@ class TestEdgeCases:
         eq = [EQ_MEAN] * n_years
         [SUPER_MEAN] * n_years
         r = run_single_trial(household=h, inputs=inputs, eq_returns=eq)
-        # With no payment, principal stays flat (negative amortisation prevented)
-        assert r.total_mortgage == 500_000.0
+        # M11: unpaid interest capitalises, so the balance exceeds the principal.
+        assert r.total_mortgage > 500_000.0
 
     def test_io_mortgage_interest_charged(self) -> None:
         """A $500k IO mortgage at 6% should reduce bridge vs. no mortgage.
@@ -404,8 +404,8 @@ class TestEdgeCases:
             f"IO mortgage case (${r_with.bridge:,.0f}) should be less "
             f"than no-mortgage case (${r_without.bridge:,.0f})"
         )
-        # IO mortgage principal should still be unchanged
-        assert r_with.total_mortgage == 500_000.0
+        # M11: unpaid interest-only interest capitalises, so the balance grows.
+        assert r_with.total_mortgage > 500_000.0
 
     def test_zero_super_balance(self) -> None:
         """Earner with no starting super should not crash."""

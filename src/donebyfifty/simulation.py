@@ -32,13 +32,17 @@ from primitives import (
     PT_WEEKS_PER_YEAR,
     SUPER_EQ_CORR,
     AssetHolding,
+    CostBaseLot,
     amortize_mortgage_monthly,
+    cgt_split_tax,
+    cgt_weighted_rate,
     consulting_net_income,
     generate_asset_return,
     generate_correlated_returns,
     generate_correlated_triplet,
     generate_mortgage_rate,
     handle_offset_overflow,
+    indexed_cost_base,
     sell_assets,
     tax,
 )
@@ -82,6 +86,20 @@ class _SimulationState:
     # Per-account (index matches household.investment_accounts)
     account_values: list[float] = field(default_factory=list)
     account_bases: list[float] = field(default_factory=list)
+
+    # H5 — acquisition-dated cost-base lots per account. Indexation keys off
+    # each lot's own ``incurred`` year (s960-275), not simulation year 0.
+    account_lots: list[list[CostBaseLot]] = field(default_factory=list)
+
+    # H5 — cumulative inflation factor per simulation year, so a lot can be
+    # indexed by ``cum_now / cum_incurred``.
+    cumulative_inflation_by_year: list[float] = field(default_factory=list)
+
+    # H5 — 30 June 2027 reform snapshot per account: market value and nominal
+    # basis at the reform line, plus the cumulative inflation factor then.
+    reform_values: list[float | None] = field(default_factory=list)
+    reform_bases: list[float] = field(default_factory=list)
+    reform_inflation: float = 1.0
 
     # Implicit cash balance for households with no investment accounts
     # Surplus cash accumulates here; drawn from during retirement shortfalls
@@ -132,6 +150,12 @@ def init_state(
         current_mortgage_rates=[m.interest_rate for m in household.mortgages],
         account_values=[a.market_value for a in household.investment_accounts],
         account_bases=[a.cost_basis for a in household.investment_accounts],
+        account_lots=[
+            [{"basis": a.cost_basis, "incurred": 0}] if a.cost_basis > 0 else []
+            for a in household.investment_accounts
+        ],
+        reform_values=[None] * len(household.investment_accounts),
+        reform_bases=[0.0] * len(household.investment_accounts),
     )
     return state
 
@@ -156,6 +180,17 @@ def _num_offset_accounts(household: Household) -> int:
     return sum(1 for a in household.investment_accounts if a.is_offset)
 
 
+def _series_rng(seed: int | None) -> random.Random:
+    """Return the RNG used for pre-generated return series.
+
+    With an explicit seed the generator is fully isolated. Without one it is
+    seeded from the module-level RNG, so a global ``random.seed`` — e.g. a test
+    fixture — makes unseeded runs reproducible rather than drawing fresh OS
+    entropy (M14).
+    """
+    return random.Random(seed) if seed is not None else random.Random(random.getrandbits(64))
+
+
 # =============================================================================
 # WORKING YEAR
 # =============================================================================
@@ -172,6 +207,7 @@ def simulate_working_year(
     *,
     offset_idxs: list[int] | None = None,
     non_offset_idxs: list[int] | None = None,
+    infl_t: float | None = None,
 ) -> float:
     """Simulate one calendar year while at least one earner is working.
 
@@ -195,6 +231,8 @@ def simulate_working_year(
             ``(1 + inputs.inflation) ** y`` (fixed rate).
         offset_idxs: Precomputed offset account indices. If None, computed now.
         non_offset_idxs: Precomputed non-offset account indices. If None, computed now.
+        infl_t: Per-year inflation for uplifting real returns to nominal.
+            If None, uses ``inputs.inflation``.
 
     Returns:
         Unmet spending shortfall for this year (0 if fully covered).
@@ -203,27 +241,37 @@ def simulate_working_year(
     y = state.year
     inflation = inputs.inflation
     year_factor = cumulative_inflation if cumulative_inflation is not None else (1 + inflation) ** y
+    # Per-year inflation for uplifting real returns to nominal
+    per_year_infl = infl_t if infl_t is not None else inputs.inflation
 
     # ── 0. Grow super FIRST with per-earner returns ─────────────────────
     for si, earner in enumerate(household.earners):
         if earner.super_mean_override is not None:
             if deterministic:
-                per_super = earner.super_mean_override
+                per_super = (1.0 + earner.super_mean_override) * (1.0 + per_year_infl) - 1.0
             else:
                 mu_s = (
                     math.log(1 + earner.super_mean_override)
                     - 0.5 * (earner.super_std_override or 0.12) ** 2
                 )
                 z_s = random.gauss(0, 1)
-                per_super = math.exp(mu_s + (earner.super_std_override or 0.12) * z_s) - 1
+                per_super = (
+                    math.exp(mu_s + (earner.super_std_override or 0.12) * z_s)
+                    * (1.0 + per_year_infl)
+                    - 1.0
+                )
         else:
             # Blended return: growth_pct% equity + (1 - growth_pct)% bonds
             growth_pct = earner.super_growth_pct
             if earner.super_glide_end_year is not None and y < earner.super_glide_end_year:
                 progress = y / earner.super_glide_end_year
                 growth_pct = growth_pct + (earner.super_glide_target_pct - growth_pct) * progress
-            eq_ret = generate_asset_return("equity", eq_z, eq_return, deterministic=deterministic)
-            bond_ret = generate_asset_return("bonds", eq_z, eq_return, deterministic=deterministic)
+            eq_ret = generate_asset_return(
+                "equity", eq_z, eq_return, deterministic=deterministic, inflation=per_year_infl
+            )
+            bond_ret = generate_asset_return(
+                "bonds", eq_z, eq_return, deterministic=deterministic, inflation=per_year_infl
+            )
             per_super = (growth_pct / 100.0) * eq_ret + (1.0 - growth_pct / 100.0) * bond_ret
         state.super_balances[si] *= 1.0 + per_super
     if inputs.super_fee_rate > 0:
@@ -449,7 +497,6 @@ def simulate_working_year(
             inputs,
             offset_idxs=offset_idxs,
             non_offset_idxs=non_offset_idxs,
-            cumulative_inflation_factor=year_factor,
         )
         if unmet > 0:
             state.unmet_spending += unmet
@@ -487,7 +534,6 @@ def simulate_working_year(
                 inputs,
                 offset_idxs=offset_idxs,
                 non_offset_idxs=non_offset_idxs,
-                cumulative_inflation_factor=year_factor,
             )
             if unmet > 0:
                 state.unmet_spending += unmet
@@ -540,7 +586,13 @@ def simulate_working_year(
         )
         state.account_values[first_offset_idx] = new_o
         state.account_values[target_idx] = new_acct_val
+        overflow_basis = new_acct_basis - acct_basis
         state.account_bases[target_idx] = new_acct_basis
+        # H5 — an overflow sweep adds basis incurred this year, as its own lot.
+        if overflow_basis > 0 and target_idx < len(state.account_lots):
+            state.account_lots[target_idx].append(
+                {"basis": overflow_basis, "incurred": state.year}
+            )
 
     # ── 7. Grow investment accounts (custom interest rates if specified) ────
     for ai, account in enumerate(household.investment_accounts):
@@ -553,9 +605,9 @@ def simulate_working_year(
                 params = ASSET_CLASS_PARAMS.get(account.asset_class)
                 if params is None:
                     # Unknown asset class — fall back to fixed rate
-                    asset_return = account.interest_rate
+                    asset_return = (1.0 + account.interest_rate) * (1.0 + per_year_infl) - 1.0
                 elif deterministic:
-                    asset_return = account.interest_rate
+                    asset_return = (1.0 + account.interest_rate) * (1.0 + per_year_infl) - 1.0
                 else:
                     mu = math.log(1 + account.interest_rate) - 0.5 * params["std"] ** 2
                     z_independent = random.gauss(0, 1)
@@ -563,11 +615,14 @@ def simulate_working_year(
                         params["corr_with_eq"] * eq_z
                         + math.sqrt(1 - params["corr_with_eq"] ** 2) * z_independent
                     )
-                    asset_return = math.exp(mu + params["std"] * z_asset) - 1
+                    asset_return = (
+                        math.exp(mu + params["std"] * z_asset) * (1.0 + per_year_infl) - 1.0
+                    )
             else:
                 # Use asset class returns
                 asset_return = generate_asset_return(
-                    account.asset_class, eq_z, eq_return, deterministic=deterministic
+                    account.asset_class, eq_z, eq_return, deterministic=deterministic,
+                    inflation=per_year_infl
                 )
             state.account_values[ai] *= 1.0 + asset_return
         # Offset accounts do NOT grow — benefit is via reduced mortgage interest
@@ -595,7 +650,6 @@ def _drawdown(
     *,
     non_offset_idxs: list[int] | None = None,
     offset_idxs: list[int] | None = None,
-    cumulative_inflation_factor: float = 1.0,
 ) -> float:
     """Draw down investment accounts to cover a spending shortfall.
 
@@ -610,9 +664,6 @@ def _drawdown(
         inputs: Simulation parameters (CGT on/off, sell order).
         non_offset_idxs: Precomputed non-offset indices. If None, computed now.
         offset_idxs: Precomputed offset indices. If None, computed now.
-        cumulative_inflation_factor: Cumulative inflation multiplier for
-            CGT cost-base indexation (passed through to ``sell_assets``).
-            Defaults to 1.0 (no indexation) for backward compatibility.
 
     Returns:
         Remaining shortfall after drawing all available funds (0 if covered).
@@ -702,39 +753,74 @@ def _drawdown(
             "val": state.account_values[ai],
             "basis": state.account_bases[ai],
         }
-        # Compute per-owner weighted marginal CGT rate.
-        #   Post-2027 reform: CPI-indexed cost basis replaces the 50% CGT
-        #   discount (s 115-25 ITAA 1997 repealed).  Effective rate per
-        #   earner = max(marginal_rate, 0.30), weighted by ownership share.
-        # Also compute raw (un-floored) rate for CGT breakdown counterfactual.
+        # Compute per-owner weighted CGT rate.
+        #   H6: the gain is stacked on each owner's income and taxed by
+        #   integrating the bracket schedule from ``income`` to
+        #   ``income + gain`` (per owner), rather than applying one flat
+        #   marginal rate to the whole gain.
+        #   H5: for a post-reform disposal of an asset held at 30 June 2027 the
+        #   gain is split at the reform line — the pre-reform portion gets the
+        #   50% discount, the post-reform portion is CPI-indexed from the reform
+        #   market value with the 30% floor. The indexation is then embedded in
+        #   the rate, so ``sell_assets`` is passed a factor of 1.0 (passing the
+        #   full factor as well would double-count indexation).
         weighted_rate = account.cgt_rate
         raw_weighted_rate = account.cgt_rate
         if cgt_on and state.earner_taxable_incomes:
-            from primitives import marginal_rate as _marginal_rate
-
-            weighted_rate = 0.0
-            raw_weighted_rate = 0.0
-            for ei, share in account.ownership.items():
-                if share <= 0:
-                    continue
-                if ei < len(state.earner_taxable_incomes):
-                    earner_mr = _marginal_rate(state.earner_taxable_incomes[ei])
-                else:
-                    earner_mr = 0.0
-                weighted_rate += share * max(earner_mr, 0.30)
-                raw_weighted_rate += share * earner_mr
+            owners = [
+                (
+                    state.earner_taxable_incomes[ei]
+                    if ei < len(state.earner_taxable_incomes)
+                    else 0.0,
+                    share,
+                )
+                for ei, share in account.ownership.items()
+                if share > 0
+            ]
+            nominal_gain = asset["val"] - asset["basis"]
+            reform_mv = state.reform_values[ai] if ai < len(state.reform_values) else None
+            reform_year_index = max(0, 2027 - inputs.simulation_start_year)
+            if state.year > reform_year_index and reform_mv is not None and nominal_gain > 0:
+                # Pre-reform portion: nominal gain to the reform line.
+                pre_gain = max(0.0, reform_mv - state.reform_bases[ai])
+                # Post-reform portion: proceeds less the reform-line basis
+                # indexed from 30 June 2027 (each lot from its own year).
+                lots = state.account_lots[ai] if ai < len(state.account_lots) else []
+                post_basis = indexed_cost_base(
+                    lots, state.year, state.cumulative_inflation_by_year
+                )
+                post_gain = max(0.0, asset["val"] - post_basis)
+                split_tax, split_tax_raw = cgt_split_tax(owners, pre_gain, post_gain)
+                weighted_rate = split_tax / nominal_gain
+                raw_weighted_rate = split_tax_raw / nominal_gain
+            else:
+                # Pre-reform disposal (on or before the 2027 line): the 50% CGT
+                # discount applies and there is no cost-base indexation.
+                weighted_rate, raw_weighted_rate = cgt_weighted_rate(
+                    owners, nominal_gain, discount=0.5
+                )
 
         old_remain = remain
+        old_basis = state.account_bases[ai]
         remain, tax_paid, tax_without_floor = sell_assets(
             asset,
             remain,
             cgt_on,
             weighted_marginal_rate=weighted_rate,
             raw_marginal_rate=raw_weighted_rate,
-            cumulative_inflation_factor=cumulative_inflation_factor,
+            # H5 indexation is already embedded in ``weighted_rate`` (via the
+            # reform split or the pre-reform discount), so sell_assets must not
+            # index the basis again.
+            cumulative_inflation_factor=1.0,
         )
         state.account_values[ai] = asset["val"]
         state.account_bases[ai] = asset["basis"]
+        # H5 — scale the account's lots so their total tracks the cost basis
+        # that remains after the proportional-basis sale.
+        if old_basis > 0 and ai < len(state.account_lots):
+            keep = max(0.0, asset["basis"]) / old_basis
+            for lot in state.account_lots[ai]:
+                lot["basis"] *= keep
 
         # Track per-year drawdown composition (Work Items 4, 5)
         net_proceeds = old_remain - remain
@@ -780,6 +866,14 @@ class TrialResult:
         cgt_paid_by_age: list[float] | None = None,
         cgt_without_floor_by_age: list[float] | None = None,
         mortgage_rate_by_age: list[list[float]] | None = None,
+        # M3 — per-trial deflators for real (today's dollars) conversion
+        floor_deflator: float = 1.0,
+        horizon_deflator: float = 1.0,
+        # M4a — per-trial totals in today's dollars
+        total_offset_drawn: float = 0.0,
+        total_non_offset_drawn: float = 0.0,
+        total_cgt_paid: float = 0.0,
+        total_cgt_without_floor: float = 0.0,
     ) -> None:
         self.bridge = bridge
         self.super_balances = list(super_balances)
@@ -792,6 +886,14 @@ class TrialResult:
         self.term_cleared = list(term_cleared) if term_cleared else []
         self.floor_age = floor_age
         self.first_failure_age = first_failure_age
+        # M3 — deflators for real conversion
+        self.floor_deflator = floor_deflator
+        self.horizon_deflator = horizon_deflator
+        # M4a — per-trial totals in today's dollars
+        self.total_offset_drawn = total_offset_drawn
+        self.total_non_offset_drawn = total_non_offset_drawn
+        self.total_cgt_paid = total_cgt_paid
+        self.total_cgt_without_floor = total_cgt_without_floor
         # Per-year trajectory
         self.bridge_by_age = list(bridge_by_age) if bridge_by_age else []
         self.mortgage_by_age = [list(y) for y in (mortgage_by_age or [])]
@@ -859,11 +961,22 @@ def run_single_trial(
         target_idx = non_offset_idxs[0] if non_offset_idxs else 0
         state.account_values[target_idx] += windfall
         state.account_bases[target_idx] += windfall
+        if target_idx < len(state.account_lots):
+            state.account_lots[target_idx].append({"basis": windfall, "incurred": 0})
 
     min_bridge: float = float("inf")
     floor_age: int = inputs.simulation_start_age
     first_failure_age: int | None = None
     cumulative_inflation = 1.0
+    # M3 — cumulative inflation factor prevailing in the year of the running
+    # minimum, and the factor at the horizon (end of the last year).
+    floor_deflator: float = 1.0
+    horizon_deflator: float = 1.0
+    # M4a — per-trial drawdown totals (today's dollars)
+    total_offset_drawn = 0.0
+    total_non_offset_drawn = 0.0
+    total_cgt_paid = 0.0
+    total_cgt_without_floor = 0.0
 
     # Per-year trajectory accumulators (Work Items 1, 10)
     bridge_by_age_trial: list[float] = []  # one entry per year
@@ -935,6 +1048,21 @@ def run_single_trial(
         else:
             cumulative_inflation = (1 + inputs.inflation) ** y
 
+        # Determine per-year inflation for uplifting real returns
+        if inf_returns is not None:
+            year_infl = inf_returns[y]
+        else:
+            year_infl = inputs.inflation
+
+        # M3 — this year's cumulative deflator (factor prevailing this year)
+        # and the running horizon deflator (one step further than the last
+        # year's factor, matching the end-of-horizon balance).
+        year_deflator = cumulative_inflation
+        horizon_deflator *= 1.0 + year_infl
+        # H5 — record this year's cumulative factor before the year is simulated
+        # so drawdown inside the year can index lots from their incurrence date.
+        state.cumulative_inflation_by_year.append(year_deflator)
+
         simulate_working_year(
             state,
             household,
@@ -945,6 +1073,7 @@ def run_single_trial(
             cumulative_inflation=cumulative_inflation,
             offset_idxs=offset_idxs,
             non_offset_idxs=non_offset_idxs,
+            infl_t=year_infl,
         )
 
         # Include unmet spending in effective bridge: a household that
@@ -954,13 +1083,33 @@ def run_single_trial(
         if current_bridge < min_bridge:
             min_bridge = current_bridge
             floor_age = age
+            floor_deflator = year_deflator
 
         # Track first age bridge goes to zero (Work Item 2)
         if first_failure_age is None and current_bridge <= 0:
             first_failure_age = age
 
-        # Capture per-year trajectory (Work Items 1, 10)
-        bridge_by_age_trial.append(current_bridge)
+        # H5 — snapshot each account at the 30 June 2027 reform line. The year
+        # containing 30 June 2027 is ``2027 - simulation_start_year``; its
+        # market value and nominal basis become the deemed reacquisition basis
+        # for any later disposal that straddles the reform.
+        if y == 2027 - inputs.simulation_start_year:
+            state.reform_values = list(state.account_values)
+            state.reform_bases = list(state.account_bases)
+            state.reform_inflation = year_deflator
+            # Subdiv 112-E deemed reacquisition: from the reform line each
+            # account's cost base is its market value then, incurred at that
+            # year — so later indexation runs from 2027, not from year 0.
+            for ai, mv in enumerate(state.account_values):
+                if ai < len(state.account_lots):
+                    state.account_lots[ai] = (
+                        [{"basis": mv, "incurred": y}] if mv > 0 else []
+                    )
+
+        # Capture per-year trajectory in today's dollars (M3: deflate by the
+        # factor prevailing in that year, so it is comparable to the
+        # per-trial floor deflated by its own year).
+        bridge_by_age_trial.append(current_bridge / year_deflator)
         mortgage_by_age_trial.append(list(state.mortgage_principals))
         offset_row = [state.account_values[oi] for oi in offset_idxs_local]
         offset_by_age_trial.append(offset_row)
@@ -968,11 +1117,17 @@ def run_single_trial(
         # Capture per-year mortgage rates
         mortgage_rate_by_age_trial.append(list(state.current_mortgage_rates))
 
-        # Capture per-year drawdown composition (Work Items 4, 5)
-        offset_drawn_by_age_trial.append(state.year_offset_drawn)
-        non_offset_drawn_by_age_trial.append(state.year_non_offset_drawn)
-        cgt_paid_by_age_trial.append(state.year_cgt_paid)
-        cgt_without_floor_by_age_trial.append(state.year_cgt_without_floor)
+        # Capture per-year drawdown composition in today's dollars (M4a/M3)
+        offset_drawn_by_age_trial.append(state.year_offset_drawn / year_deflator)
+        non_offset_drawn_by_age_trial.append(state.year_non_offset_drawn / year_deflator)
+        cgt_paid_by_age_trial.append(state.year_cgt_paid / year_deflator)
+        cgt_without_floor_by_age_trial.append(state.year_cgt_without_floor / year_deflator)
+
+        # M4a — accumulate per-trial totals (today's dollars)
+        total_offset_drawn += state.year_offset_drawn / year_deflator
+        total_non_offset_drawn += state.year_non_offset_drawn / year_deflator
+        total_cgt_paid += state.year_cgt_paid / year_deflator
+        total_cgt_without_floor += state.year_cgt_without_floor / year_deflator
 
     # ── Term-clearance check ────────────────────────────────────────────
     term_cleared: list[bool | None] = []
@@ -1007,6 +1162,14 @@ def run_single_trial(
         cgt_paid_by_age=cgt_paid_by_age_trial,
         cgt_without_floor_by_age=cgt_without_floor_by_age_trial,
         mortgage_rate_by_age=mortgage_rate_by_age_trial,
+        # M3 — real-value deflators
+        floor_deflator=floor_deflator,
+        horizon_deflator=horizon_deflator,
+        # M4a — per-trial totals
+        total_offset_drawn=total_offset_drawn,
+        total_non_offset_drawn=total_non_offset_drawn,
+        total_cgt_paid=total_cgt_paid,
+        total_cgt_without_floor=total_cgt_without_floor,
     )
 
 
@@ -1015,40 +1178,171 @@ def run_single_trial(
 # =============================================================================
 
 
-def _bootstrap_se(values: list[float], pct: float, n_bootstrap: int = 200) -> float:
-    """Compute bootstrap standard error for a given percentile.
+def _percentile_index(n: int, pct: float) -> int:
+    """Return the index for ``pct`` in a sorted list of length ``n``.
 
-    Resamples the observed values with replacement ``n_bootstrap`` times,
-    computes the requested percentile for each resample, and returns the
-    standard deviation of those estimates.
+    Single percentile definition used everywhere in the engine (M1):
+    ``round(n * pct / 100)``, clamped to the last element. Previously the
+    bootstrap used a floor while reportable percentiles used ``round``, so the
+    standard error described a different order statistic than the value it
+    annotated.
+    """
+    if n <= 0:
+        return 0
+    return min(int(round(n * pct / 100.0)), n - 1)
+
+
+def _percentile(sorted_values: list[float], pct: float) -> float:
+    """Percentile of an already-sorted list, using the shared definition."""
+    if not sorted_values:
+        return 0.0
+    return sorted_values[_percentile_index(len(sorted_values), pct)]
+
+
+def _bootstrap_percentile(
+    values: list[float],
+    pct: float,
+    *,
+    n_bootstrap: int = 1000,
+    seed: int | None = None,
+    ci: float = 0.95,
+) -> tuple[float, float, float]:
+    """Bootstrap SE and percentile interval for a percentile (M1).
+
+    Resamples the observed ``values`` with replacement ``n_bootstrap`` times
+    and returns ``(se, ci_lo, ci_hi)`` for the requested percentile.
+
+    - Uses the same percentile definition as the reported value
+      (``_percentile``) — so the SE describes the statistic it annotates.
+    - Uses a dedicated, seeded ``random.Random``: reproducible for a fixed
+      seed and isolated from the run's stream.
+    - ``n_bootstrap`` defaults to 1000 (the SE's own relative error at 200
+      resamples was ~5%).
+    - Reports a two-sided percentile interval alongside the SE.
 
     Args:
-        values: Sorted list of observed values.
-        pct: Percentile to estimate (e.g. 50.0 for median).
-        n_bootstrap: Number of bootstrap resamples (default 200).
+        values: Observed values (need not be sorted).
+        pct: Percentile to estimate (e.g. 50.0 for the median).
+        n_bootstrap: Number of bootstrap resamples (default 1000).
+        seed: Seed for the bootstrap RNG. Deterministic for a fixed seed;
+            ``None`` also yields a deterministic (default-seeded) estimate.
+        ci: Confidence level for the returned interval (default 0.95).
 
     Returns:
-        Bootstrap standard error of the percentile estimate.
+        ``(standard_error, interval_low, interval_high)``.
 
     """
-    import random as _random
-    import statistics as _stats
-
+    rng = random.Random(0 if seed is None else seed)
     n = len(values)
+    if n == 0:
+        return 0.0, 0.0, 0.0
     estimates: list[float] = []
     for _ in range(n_bootstrap):
-        sample = [_random.choice(values) for _ in range(n)]
-        sample.sort()
-        idx = int(len(sample) * pct / 100.0)
-        estimates.append(sample[min(idx, len(sample) - 1)])
-    return _stats.stdev(estimates)
+        sample = sorted(rng.choices(values, k=n))
+        estimates.append(_percentile(sample, pct))
+    se = statistics.stdev(estimates)
+    estimates.sort()
+    lo = _percentile(estimates, (1.0 - ci) / 2.0 * 100.0)
+    hi = _percentile(estimates, (1.0 + ci) / 2.0 * 100.0)
+    return se, lo, hi
+
+
+@dataclass(frozen=True)
+class MonteCarloResults(SimulationResults):
+    """``SimulationResults`` extended with the engine's new statistics.
+
+    ``SimulationResults`` lives in ``models.py``, which is owned by another
+    worker this round, so the additional engine outputs are exposed by
+    subclassing it here (additive only — every field has a default). Since a
+    ``MonteCarloResults`` *is* a ``SimulationResults``, all existing consumers
+    keep working; new consumers (B3/ui.py) can read the extra fields.
+
+    M1 — bootstrap percentile intervals
+        ``*_ci_lo`` / ``*_ci_hi`` accompany the existing ``*_se`` fields. All
+        are computed with a single percentile definition and a seeded RNG, so
+        they are reproducible for a fixed run seed.
+
+    M4a — per-trial drawdown totals (today's dollars)
+        Quantiles of the **per-trial total** drawdown components, replacing
+        the UI's sum-of-per-year-medians workaround. ``*_total_p50/p5/p95``
+        are true quantiles of the per-trial totals; ``cgt_floor_extra_total_*``
+        is the per-trial difference between CGT with and without the 30%
+        minimum-rate floor (the number the UI labels "Extra CGT").
+    """
+
+    # ── M1 — bootstrap percentile intervals ──────────────────────────────
+    bridge_median_ci_lo: float | None = None
+    bridge_median_ci_hi: float | None = None
+    bridge_p5_ci_lo: float | None = None
+    bridge_p5_ci_hi: float | None = None
+    bridge_p95_ci_lo: float | None = None
+    bridge_p95_ci_hi: float | None = None
+    super_median_ci_lo: float | None = None
+    super_median_ci_hi: float | None = None
+
+    # ── M4a — per-trial drawdown totals (today's dollars) ────────────────
+    offset_drawn_total_p5: float = 0.0
+    offset_drawn_total_p50: float = 0.0
+    offset_drawn_total_p95: float = 0.0
+    non_offset_drawn_total_p5: float = 0.0
+    non_offset_drawn_total_p50: float = 0.0
+    non_offset_drawn_total_p95: float = 0.0
+    cgt_paid_total_p5: float = 0.0
+    cgt_paid_total_p50: float = 0.0
+    cgt_paid_total_p95: float = 0.0
+    cgt_without_floor_total_p5: float = 0.0
+    cgt_without_floor_total_p50: float = 0.0
+    cgt_without_floor_total_p95: float = 0.0
+    cgt_floor_extra_total_p5: float = 0.0
+    """Per-trial total CGT attributable to the 30% minimum-rate floor
+    (CGT paid minus CGT without the floor), P5."""
+    cgt_floor_extra_total_p50: float = 0.0
+    """Median per-trial extra CGT from the 30% minimum-rate floor.
+
+    This is a true quantile of the per-trial difference, not a difference of
+    two sums of per-year medians.
+    """
+    cgt_floor_extra_total_p95: float = 0.0
+
+    def summary_dict(self) -> dict[str, object]:
+        """Flat dict for serialisation, including the extended fields."""
+        data: dict[str, object] = dict(super().summary_dict())
+        data.update(
+            {
+                "bridge_median_ci_lo": self.bridge_median_ci_lo,
+                "bridge_median_ci_hi": self.bridge_median_ci_hi,
+                "bridge_p5_ci_lo": self.bridge_p5_ci_lo,
+                "bridge_p5_ci_hi": self.bridge_p5_ci_hi,
+                "bridge_p95_ci_lo": self.bridge_p95_ci_lo,
+                "bridge_p95_ci_hi": self.bridge_p95_ci_hi,
+                "super_median_ci_lo": self.super_median_ci_lo,
+                "super_median_ci_hi": self.super_median_ci_hi,
+                "offset_drawn_total_p5": self.offset_drawn_total_p5,
+                "offset_drawn_total_p50": self.offset_drawn_total_p50,
+                "offset_drawn_total_p95": self.offset_drawn_total_p95,
+                "non_offset_drawn_total_p5": self.non_offset_drawn_total_p5,
+                "non_offset_drawn_total_p50": self.non_offset_drawn_total_p50,
+                "non_offset_drawn_total_p95": self.non_offset_drawn_total_p95,
+                "cgt_paid_total_p5": self.cgt_paid_total_p5,
+                "cgt_paid_total_p50": self.cgt_paid_total_p50,
+                "cgt_paid_total_p95": self.cgt_paid_total_p95,
+                "cgt_without_floor_total_p5": self.cgt_without_floor_total_p5,
+                "cgt_without_floor_total_p50": self.cgt_without_floor_total_p50,
+                "cgt_without_floor_total_p95": self.cgt_without_floor_total_p95,
+                "cgt_floor_extra_total_p5": self.cgt_floor_extra_total_p5,
+                "cgt_floor_extra_total_p50": self.cgt_floor_extra_total_p50,
+                "cgt_floor_extra_total_p95": self.cgt_floor_extra_total_p95,
+            }
+        )
+        return data
 
 
 def run_monte_carlo(
     household: Household,
     inputs: SimulationInputs,
     seed: int | None = None,
-) -> SimulationResults:
+    near_miss_threshold: float = 0.0,
+) -> MonteCarloResults:
     """Run a full Monte Carlo simulation with ``n_iterations`` independent paths.
 
     Each trial generates a correlated equity/super return series using
@@ -1060,16 +1354,23 @@ def run_monte_carlo(
         inputs: Simulation parameters.
         seed: Optional random seed for reproducibility. If None, uses
               the system random state.
+        near_miss_threshold: Dollar buffer (today's dollars) used to count
+            near misses — trials whose worst bridge balance fell at or below
+            this level. ``0.0`` (default) counts only outright failures.
+            Exposed on the result as ``near_miss_threshold``.
 
     Returns:
-        ``SimulationResults`` with sorted percentile statistics and
-        bootstrap standard errors for key percentiles.
+        ``MonteCarloResults`` (a ``SimulationResults``) with sorted
+        percentile statistics, bootstrap standard errors and percentile
+        intervals for key percentiles, and per-trial drawdown totals.
 
     Raises:
         ValueError: If ``inputs.sell_strategy`` is not ``"waterfall"`` (the
             only currently implemented strategy).
 
     """
+    if near_miss_threshold < 0:
+        raise ValueError(f"near_miss_threshold must be >= 0 (got {near_miss_threshold})")
     if inputs.sell_strategy != "waterfall":
         raise ValueError(
             f"Unsupported sell_strategy '{inputs.sell_strategy}'. "
@@ -1079,13 +1380,10 @@ def run_monte_carlo(
     # scenario comparisons with the same seed share identical equity paths
     # regardless of which per-trial stochastic subsystems are active (Work
     # Item 6 / Finding F3).
+    series_rng = _series_rng(seed)
     if seed is not None:
-        series_rng = random.Random(seed)
         # Per-trial processing gets a derived seed (offset from series RNG)
         random.seed(seed + 1 if isinstance(seed, int) else hash(str(seed) + "trial"))
-    else:
-        series_rng = random.Random()
-        # module-level random continues with system entropy
 
     n_years = min(e.super_access_age for e in household.earners) - inputs.simulation_start_age
     bridge_values: list[float] = []
@@ -1094,6 +1392,9 @@ def run_monte_carlo(
     per_earner_supers: list[list[float]] = []
     per_mortgage_remaining: list[list[float]] = []
     per_mortgage_term_cleared: list[list[bool | None]] = []
+    # M4a — per-trial drawdown totals (today's dollars), one tuple per trial:
+    # (offset drawn, non-offset drawn, CGT paid, CGT without floor).
+    per_trial_totals: list[tuple[float, float, float, float]] = []
 
     # Track the trial with the worst running-minimum bridge (for diagnostics)
     global_floor_value: float = float("inf")
@@ -1127,6 +1428,14 @@ def run_monte_carlo(
     # subsystems (mortgage rates, per-earner super overrides), ensuring
     # scenario comparisons with the same seed share identical equity paths
     # (Work Item 6 / Finding F3).
+    #
+    # M12: the generators also return a correlated super leg. It is
+    # deliberately NOT used here — super is modelled per earner inside
+    # ``simulate_working_year`` as an equity/bond blend (so per-earner
+    # ``super_mean_override`` / ``super_std_override`` and the glide path are
+    # honoured), which gives an effective equity correlation of
+    # ``growth_pct + (1 - growth_pct) * BOND_EQ_CORR`` rather than
+    # ``SUPER_EQ_CORR``. The super leg is discarded (bound to ``_super_*``).
     all_series: list[tuple[list[float], list[float], list[float]]] = []
     for _ in range(inputs.n_iterations):
         eq_returns: list[float] = []
@@ -1134,16 +1443,22 @@ def run_monte_carlo(
         inf_returns: list[float] = []
         for _y in range(n_years):
             if inputs.stochastic_inflation:
+                # Generate triplet WITHOUT uplift, then uplift using realised inflation
                 (eq_r, eq_z), (_super_r, _super_z), inf_r = generate_correlated_triplet(
                     rng=series_rng
                 )
+                # Uplift equity return using the realised inflation for this year
+                eq_r_nominal = (1.0 + eq_r) * (1.0 + inf_r) - 1.0
+                eq_returns.append(eq_r_nominal)
+                eq_zs.append(eq_z)
                 inf_returns.append(inf_r)
             else:
                 eq_r, _super_r, eq_z = generate_correlated_returns(
-                    rho=SUPER_EQ_CORR, return_z=True, rng=series_rng
+                    rho=SUPER_EQ_CORR, return_z=True, rng=series_rng,
+                    inflation=inputs.inflation
                 )
-            eq_returns.append(eq_r)
-            eq_zs.append(eq_z)
+                eq_returns.append(eq_r)
+                eq_zs.append(eq_z)
         all_series.append((eq_returns, eq_zs, inf_returns))
 
     # ── Phase 2: Run trials using pre-generated series
@@ -1158,14 +1473,28 @@ def run_monte_carlo(
             eq_zs=eq_zs,
             inf_returns=inf_returns if inputs.stochastic_inflation else None,
         )
-        bridge_values.append(result.bridge)
-        min_bridge_values.append(result.min_bridge)
-        super_values.append(result.total_super)
-        per_earner_supers.append(result.super_balances)
+        # M3 — convert each trial's nominal balances to today's dollars using
+        # that trial's own deflators (realised inflation when stochastic).
+        real_bridge = result.bridge / result.horizon_deflator
+        real_min_bridge = result.min_bridge / result.floor_deflator
+        bridge_values.append(real_bridge)
+        min_bridge_values.append(real_min_bridge)
+        super_values.append(result.total_super / result.horizon_deflator)
+        per_earner_supers.append(
+            [s / result.horizon_deflator for s in result.super_balances]
+        )
         per_mortgage_remaining.append(result.mortgage_principals)
         per_mortgage_term_cleared.append(result.term_cleared)
+        per_trial_totals.append(
+            (
+                result.total_offset_drawn,
+                result.total_non_offset_drawn,
+                result.total_cgt_paid,
+                result.total_cgt_without_floor,
+            )
+        )
 
-        # Accumulate per-year trajectory (Work Items 1, 10)
+        # Accumulate per-year trajectory (Work Items 1, 10) — already real
         for y in range(n_years):
             if y < len(result.bridge_by_age):
                 bridge_by_age_accum[y].append(result.bridge_by_age[y])
@@ -1178,7 +1507,7 @@ def run_monte_carlo(
                     if oi < len(offset_by_age_accum[y]):
                         offset_by_age_accum[y][oi].append(result.offset_by_age[y][oi])
 
-        # Accumulate per-year drawdown (Work Items 4, 5)
+        # Accumulate per-year drawdown (Work Items 4, 5) — already real
         for y in range(n_years):
             if y < len(result.offset_drawn_by_age):
                 offset_drawn_accum[y].append(result.offset_drawn_by_age[y])
@@ -1193,26 +1522,21 @@ def run_monte_carlo(
                     if mi < len(mortgage_rate_accum[y]):
                         mortgage_rate_accum[y][mi].append(result.mortgage_rate_by_age[y][mi])
 
-        # Track worst running-minimum across all trials
-        if result.min_bridge < global_floor_value:
-            global_floor_value = result.min_bridge
+        # Track worst running-minimum across all trials (real dollars)
+        if real_min_bridge < global_floor_value:
+            global_floor_value = real_min_bridge
             global_floor_age = result.floor_age
-            global_floor_end_bridge = result.bridge
+            global_floor_end_bridge = real_bridge
 
         # Collect failure ages for near-miss analysis (Work Item 2)
-        if result.min_bridge <= 0 and result.first_failure_age is not None:
+        if real_min_bridge <= 0 and result.first_failure_age is not None:
             failure_ages.append(result.first_failure_age)
 
-    # ── Deflate to today's dollars (real values) ──────────────────────
-    # All bridge figures are deflated so the client reads them in today's
-    # purchasing power. This is the convention established by Work Item 7.
-    deflator = (1 + inputs.inflation) ** n_years
-    bridge_values = [v / deflator for v in bridge_values]
-    min_bridge_values = [v / deflator for v in min_bridge_values]
-    if global_floor_value < float("inf"):
-        global_floor_value /= deflator
-        global_floor_end_bridge /= deflator
-
+    # ── Deflation to today's dollars is done per trial above (M3) ──────
+    # Each trial uses its own deflator: balances at the horizon by the
+    # realised horizon factor, the floor by the factor prevailing in the
+    # year it occurred. This makes the fixed-inflation case bit-identical to
+    # before and makes stochastic inflation properly neutral.
     bridge_values.sort()
     min_bridge_values.sort()
     super_values.sort()
@@ -1228,22 +1552,16 @@ def run_monte_carlo(
     bridge_by_age_p95: list[float] = []
 
     for y in range(n_years):
+        # Values are already deflated to today's dollars per trial (M3).
         vals = sorted(bridge_by_age_accum[y])
-        # Deflate each year's values using per-year deflator
-        yr_deflator = (1 + inputs.inflation) ** y
-        vals = [v / yr_deflator for v in vals]
-        ny = len(vals)
 
-        def _pct(p: int) -> float:
-            return vals[min(int(round(ny * p / 100)), ny - 1)] if ny > 0 else 0.0
-
-        bridge_by_age_p5.append(_pct(5))
-        bridge_by_age_p10.append(_pct(10))
-        bridge_by_age_p25.append(_pct(25))
-        bridge_by_age_p50.append(_pct(50))
-        bridge_by_age_p75.append(_pct(75))
-        bridge_by_age_p90.append(_pct(90))
-        bridge_by_age_p95.append(_pct(95))
+        bridge_by_age_p5.append(_percentile(vals, 5))
+        bridge_by_age_p10.append(_percentile(vals, 10))
+        bridge_by_age_p25.append(_percentile(vals, 25))
+        bridge_by_age_p50.append(_percentile(vals, 50))
+        bridge_by_age_p75.append(_percentile(vals, 75))
+        bridge_by_age_p90.append(_percentile(vals, 90))
+        bridge_by_age_p95.append(_percentile(vals, 95))
 
     # ── Compute per-year mortgage percentiles (Work Item 10) ──────────
     mortgage_by_age_ages = list(bridge_by_age_ages)
@@ -1258,10 +1576,9 @@ def run_monte_carlo(
             vals = (
                 sorted(mortgage_by_age_accum[y][mi]) if mi < len(mortgage_by_age_accum[y]) else []
             )
-            ny = len(vals)
-            p50_list.append(vals[ny // 2] if ny > 0 else 0.0)
-            p5_list.append(vals[min(int(round(ny * 0.05)), ny - 1)] if ny > 0 else 0.0)
-            p95_list.append(vals[min(int(round(ny * 0.95)), ny - 1)] if ny > 0 else 0.0)
+            p50_list.append(_percentile(vals, 50))
+            p5_list.append(_percentile(vals, 5))
+            p95_list.append(_percentile(vals, 95))
         mortgage_by_age_out[mortgage.label] = {
             "p50": p50_list,
             "p5": p5_list,
@@ -1276,10 +1593,9 @@ def run_monte_carlo(
         p95_list = []
         for y in range(n_years):
             vals = sorted(offset_by_age_accum[y][oi]) if oi < len(offset_by_age_accum[y]) else []
-            ny = len(vals)
-            p50_list.append(vals[ny // 2] if ny > 0 else 0.0)
-            p5_list.append(vals[min(int(round(ny * 0.05)), ny - 1)] if ny > 0 else 0.0)
-            p95_list.append(vals[min(int(round(ny * 0.95)), ny - 1)] if ny > 0 else 0.0)
+            p50_list.append(_percentile(vals, 50))
+            p5_list.append(_percentile(vals, 5))
+            p95_list.append(_percentile(vals, 95))
         offset_by_age_out[olabel] = {
             "p50": p50_list,
             "p5": p5_list,
@@ -1294,10 +1610,9 @@ def run_monte_carlo(
         p95_list = []
         for y in range(n_years):
             vals = sorted(mortgage_rate_accum[y][mi]) if mi < len(mortgage_rate_accum[y]) else []
-            ny = len(vals)
-            p50_list.append(vals[ny // 2] if ny > 0 else 0.0)
-            p5_list.append(vals[min(int(round(ny * 0.05)), ny - 1)] if ny > 0 else 0.0)
-            p95_list.append(vals[min(int(round(ny * 0.95)), ny - 1)] if ny > 0 else 0.0)
+            p50_list.append(_percentile(vals, 50))
+            p5_list.append(_percentile(vals, 5))
+            p95_list.append(_percentile(vals, 95))
         mortgage_rate_by_age_out[mortgage.label] = {
             "p50": p50_list,
             "p5": p5_list,
@@ -1308,13 +1623,7 @@ def run_monte_carlo(
     def _percentile_series(accum: list[list[float]], pct: int) -> list[float]:
         result_list: list[float] = []
         for y in range(n_years):
-            vals = sorted(accum[y])
-            ny = len(vals)
-            if ny > 0:
-                idx = min(int(round(ny * pct / 100)), ny - 1)
-                result_list.append(vals[idx])
-            else:
-                result_list.append(0.0)
+            result_list.append(_percentile(sorted(accum[y]), float(pct)))
         return result_list
 
     offset_drawn_p50 = _percentile_series(offset_drawn_accum, 50)
@@ -1329,19 +1638,29 @@ def run_monte_carlo(
     n = len(bridge_values)
     p_success = sum(1 for b in min_bridge_values if b > 0) / n
 
+    # ── Compute per-trial drawdown totals (M4a) ─────────────────────────
+    # Each component is a true quantile of the per-trial total, not a sum of
+    # per-year medians. ``cgt_floor_extra`` is the per-trial difference
+    # between CGT with and without the 30% minimum-rate floor.
+    offset_drawn_totals = sorted(t[0] for t in per_trial_totals)
+    non_offset_drawn_totals = sorted(t[1] for t in per_trial_totals)
+    cgt_paid_totals = sorted(t[2] for t in per_trial_totals)
+    cgt_without_floor_totals = sorted(t[3] for t in per_trial_totals)
+    cgt_floor_extra_totals = sorted(t[2] - t[3] for t in per_trial_totals)
+
     # Per-earner median super at horizon
     per_earner_super_p50: dict[str, float] = {}
     if per_earner_supers:
         for ei, earner in enumerate(household.earners):
             values = sorted(t[ei] for t in per_earner_supers)
-            per_earner_super_p50[earner.label] = values[len(values) // 2]
+            per_earner_super_p50[earner.label] = _percentile(values, 50)
 
     # Per-mortgage median remaining at horizon
     remaining_mortgage_p50: dict[str, float] = {}
     if per_mortgage_remaining:
         for mi, mortgage in enumerate(household.mortgages):
             values = sorted(t[mi] for t in per_mortgage_remaining)
-            remaining_mortgage_p50[mortgage.label] = values[len(values) // 2]
+            remaining_mortgage_p50[mortgage.label] = _percentile(values, 50)
 
     # Per-mortgage term-clearance rates
     per_mortgage_term_cleared_pct: dict[str, float] = {}
@@ -1370,22 +1689,32 @@ def run_monte_carlo(
     else:
         mortgage_term_clearance_rate = 1.0
 
-    # ── Bootstrap standard errors for key percentiles ──────────────────
+    # ── Bootstrap standard errors and percentile intervals (M1) ─────────
+    # Seeded, isolated RNG; >=1000 resamples; one percentile definition.
     bridge_mean_se = statistics.stdev(bridge_values) / math.sqrt(n)
-    bridge_median_se = _bootstrap_se(bridge_values, 50.0)
-    bridge_p5_se = _bootstrap_se(bridge_values, 5.0)
-    bridge_p95_se = _bootstrap_se(bridge_values, 95.0)
-    super_median_se = _bootstrap_se(super_values, 50.0)
+    bridge_median_se, bridge_median_lo, bridge_median_hi = _bootstrap_percentile(
+        bridge_values, 50.0, seed=seed
+    )
+    bridge_p5_se, bridge_p5_lo, bridge_p5_hi = _bootstrap_percentile(
+        bridge_values, 5.0, seed=seed
+    )
+    bridge_p95_se, bridge_p95_lo, bridge_p95_hi = _bootstrap_percentile(
+        bridge_values, 95.0, seed=seed
+    )
+    super_median_se, super_median_lo, super_median_hi = _bootstrap_percentile(
+        super_values, 50.0, seed=seed
+    )
 
-    # ── Near-miss / failure depth analysis (Work Item 2) ─────────────
-    near_miss_rate = 1.0
+    # ── Near-miss / failure depth analysis (Work Item 2, M5) ────────────
+    # A near miss is a trial whose worst bridge balance fell at or below the
+    # configured threshold. With the default threshold of 0.0 this counts
+    # outright failures (the complement of ``p_success``); a positive
+    # threshold additionally counts trials that came within that buffer.
+    near_miss_count = sum(1 for b in min_bridge_values if b <= near_miss_threshold)
+    near_miss_rate = near_miss_count / n
     failure_age_distribution: dict[int, int] = {}
-    if failure_ages:
-        near_miss_count = sum(1 for b in min_bridge_values if b <= 0)
-        near_miss_rate = (n - near_miss_count) / n
-        # Build age distribution
-        for age in failure_ages:
-            failure_age_distribution[age] = failure_age_distribution.get(age, 0) + 1
+    for age in failure_ages:
+        failure_age_distribution[age] = failure_age_distribution.get(age, 0) + 1
 
     def p(idx: int) -> float:
         return bridge_values[min(idx, n - 1)]
@@ -1411,22 +1740,22 @@ def run_monte_carlo(
             stacklevel=2,
         )
 
-    return SimulationResults(
+    return MonteCarloResults(
         trials=n,
         p_success=p_success,
         bridge_mean=statistics.mean(bridge_values),
-        bridge_median=bridge_values[n // 2],
-        bridge_p5=p(int(round(n * 0.05))),
-        bridge_p10=p(int(round(n * 0.10))),
-        bridge_p25=p(int(round(n * 0.25))),
-        bridge_p75=p(int(round(n * 0.75))),
-        bridge_p90=p(int(round(n * 0.90))),
-        bridge_p95=p(int(round(n * 0.95))),
+        bridge_median=_percentile(bridge_values, 50),
+        bridge_p5=_percentile(bridge_values, 5),
+        bridge_p10=_percentile(bridge_values, 10),
+        bridge_p25=_percentile(bridge_values, 25),
+        bridge_p75=_percentile(bridge_values, 75),
+        bridge_p90=_percentile(bridge_values, 90),
+        bridge_p95=_percentile(bridge_values, 95),
         bridge_min=bridge_values[0],
         bridge_floor=min_bridge_values[0],
         floor_age=global_floor_age,
         floor_end_bridge=global_floor_end_bridge,
-        super_median=super_values[n // 2],
+        super_median=_percentile(super_values, 50),
         horizon_age=min(e.super_access_age for e in household.earners),
         per_earner_super_p50=per_earner_super_p50,
         remaining_mortgage_p50=remaining_mortgage_p50,
@@ -1439,11 +1768,20 @@ def run_monte_carlo(
         bridge_p5_se=bridge_p5_se,
         bridge_p95_se=bridge_p95_se,
         super_median_se=super_median_se,
-        # Work Item 2 — Near-miss / failure depth analysis
+        # M1 — bootstrap percentile intervals
+        bridge_median_ci_lo=bridge_median_lo,
+        bridge_median_ci_hi=bridge_median_hi,
+        bridge_p5_ci_lo=bridge_p5_lo,
+        bridge_p5_ci_hi=bridge_p5_hi,
+        bridge_p95_ci_lo=bridge_p95_lo,
+        bridge_p95_ci_hi=bridge_p95_hi,
+        super_median_ci_lo=super_median_lo,
+        super_median_ci_hi=super_median_hi,
+        # Work Item 2 / M5 — threshold-based near-miss / failure depth
         near_miss_rate=near_miss_rate,
-        near_miss_threshold=0.0,
+        near_miss_threshold=near_miss_threshold,
         failure_age_distribution=failure_age_distribution,
-        # Work Items 4, 5 — Per-year drawdown composition
+        # Work Items 4, 5 — Per-year drawdown composition (today's dollars)
         offset_drawn_p50=offset_drawn_p50,
         non_offset_drawn_p50=non_offset_drawn_p50,
         offset_drawn_p5=offset_drawn_p5,
@@ -1452,6 +1790,22 @@ def run_monte_carlo(
         cgt_paid_p5=cgt_paid_p5,
         cgt_paid_p95=cgt_paid_p95,
         cgt_without_floor_p50=cgt_without_floor_p50,
+        # M4a — per-trial drawdown total quantiles (today's dollars)
+        offset_drawn_total_p5=_percentile(offset_drawn_totals, 5),
+        offset_drawn_total_p50=_percentile(offset_drawn_totals, 50),
+        offset_drawn_total_p95=_percentile(offset_drawn_totals, 95),
+        non_offset_drawn_total_p5=_percentile(non_offset_drawn_totals, 5),
+        non_offset_drawn_total_p50=_percentile(non_offset_drawn_totals, 50),
+        non_offset_drawn_total_p95=_percentile(non_offset_drawn_totals, 95),
+        cgt_paid_total_p5=_percentile(cgt_paid_totals, 5),
+        cgt_paid_total_p50=_percentile(cgt_paid_totals, 50),
+        cgt_paid_total_p95=_percentile(cgt_paid_totals, 95),
+        cgt_without_floor_total_p5=_percentile(cgt_without_floor_totals, 5),
+        cgt_without_floor_total_p50=_percentile(cgt_without_floor_totals, 50),
+        cgt_without_floor_total_p95=_percentile(cgt_without_floor_totals, 95),
+        cgt_floor_extra_total_p5=_percentile(cgt_floor_extra_totals, 5),
+        cgt_floor_extra_total_p50=_percentile(cgt_floor_extra_totals, 50),
+        cgt_floor_extra_total_p95=_percentile(cgt_floor_extra_totals, 95),
         # Work Items 1, 10 — Per-year trajectory
         bridge_by_age_ages=bridge_by_age_ages,
         bridge_by_age_p5=bridge_by_age_p5,
@@ -1505,8 +1859,21 @@ def run_sequencing_analysis(
     decumulation-phase returns are reordered, since that is where
     sequencing risk matters.
 
-    Uses Option A: equity, super z-score, AND inflation returns are all
-    reordered identically to preserve within-year correlation.
+    Uses **common random numbers** (H3): one seed-locked set of per-trial
+    return series is generated up front, and both orderings are applied to
+    that same set. The two orderings therefore differ only by the reordering
+    effect, not by sampling error, and the analysis runs at the base run's
+    ``n_iterations`` (no cap) so the comparison against the base is valid.
+
+    Within-year pairing (equity return, its z-score, and that year's
+    inflation) is preserved by reordering the three series together.
+
+    Note:
+        Mortgage rates are regenerated from the reordered ``eq_z`` inside
+        ``run_single_trial``, so reordering also changes the joint
+        equity/rate path. That is intended: the analysis asks what happens
+        if a bad market sequence arrives early, and the mortgage innovation
+        is correlated with equity by construction (``BK_RHO``).
 
     Args:
         household: The household definition.
@@ -1521,11 +1888,47 @@ def run_sequencing_analysis(
         This is an opt-in analysis (~3× compute of a normal run).
 
     """
-    if seed is not None:
-        random.seed(seed)
-
     n_years = min(e.super_access_age for e in household.earners) - inputs.simulation_start_age
-    n_trials = min(inputs.n_iterations, 10_000)  # Cap at 10k for speed
+    n_trials = inputs.n_iterations  # match the base run (H3)
+
+    # ── Common random numbers (H3): one dedicated series RNG, both orderings
+    # applied to the same set of per-trial series.
+    series_rng = _series_rng(seed)
+    # Per-trial subsystems (super overrides, mortgage rates) use the module
+    # RNG; seed it consistently with the base run, and re-seed before each
+    # ordering below so both orderings share identical per-trial draws too.
+    trial_seed = (
+        (seed + 1 if isinstance(seed, int) else hash(str(seed) + "trial"))
+        if seed is not None
+        else None
+    )
+    if trial_seed is not None:
+        random.seed(trial_seed)
+
+    base_series: list[tuple[list[float], list[float], list[float]]] = []
+    for _ in range(n_trials):
+        eq_returns: list[float] = []
+        eq_zs: list[float] = []
+        inf_returns: list[float] = []
+        for _y in range(n_years):
+            if inputs.stochastic_inflation:
+                # M12: the correlated super leg is intentionally discarded —
+                # super is rebuilt per earner as an equity/bond blend.
+                (eq_r, eq_z), (_super_r, _super_z), inf_r = generate_correlated_triplet(
+                    rng=series_rng
+                )
+                eq_r = (1.0 + eq_r) * (1.0 + inf_r) - 1.0
+                inf_returns.append(inf_r)
+            else:
+                eq_r, _super_r, eq_z = generate_correlated_returns(
+                    rho=SUPER_EQ_CORR,
+                    return_z=True,
+                    rng=series_rng,
+                    inflation=inputs.inflation,
+                )
+            eq_returns.append(eq_r)
+            eq_zs.append(eq_z)
+        base_series.append((eq_returns, eq_zs, inf_returns))
 
     # Compute the drawdown start year (earliest retirement age)
     employed_retirements = [e.retirement_age for e in household.earners if e.retirement_age < 999]
@@ -1534,35 +1937,24 @@ def run_sequencing_analysis(
 
     def _run_with_order(direction: str) -> SimulationResults:
         """Run a simulation with returns reordered worst-first or best-first."""
+        # Re-seed the per-trial RNG so both orderings see identical
+        # mortgage-rate / override draws (paired design, H3).
+        if trial_seed is not None:
+            random.seed(trial_seed)
         bridge_vals: list[float] = []
         min_vals: list[float] = []
 
-        for _ in range(n_trials):
-            # Generate return series for this trial
-            eq_returns: list[float] = []
-            eq_zs: list[float] = []
-            inf_returns_list: list[float] = []
-
-            for _y in range(n_years):
-                if inputs.stochastic_inflation:
-                    (eq_r, eq_z), (_super_r, _super_z), inf_r = generate_correlated_triplet()
-                    inf_returns_list.append(inf_r)
-                else:
-                    eq_r, _super_r, eq_z = generate_correlated_returns(
-                        rho=SUPER_EQ_CORR, return_z=True
-                    )
-                eq_returns.append(eq_r)
-                eq_zs.append(eq_z)
-
-            # Reorder only the drawdown-period returns.
-            # Working years stay in their original (random) order — the
-            # sequencing risk that matters is the order of returns during
-            # the decumulation phase, when assets are being sold.
+        for eq_returns, eq_zs, inf_returns in base_series:
+            # Reorder only the drawdown-period returns. Working years stay in
+            # their original (random) order — the sequencing risk that matters
+            # is the order of returns during the decumulation phase, when
+            # assets are being sold. Reorder (equity, z, inflation) together
+            # to preserve within-year correlation.
             zipped = list(
                 zip(
                     eq_returns,
                     eq_zs,
-                    inf_returns_list if inputs.stochastic_inflation else [0.0] * n_years,
+                    inf_returns if inputs.stochastic_inflation else [0.0] * n_years,
                 )
             )
             working = zipped[:drawdown_start_year]
@@ -1584,33 +1976,27 @@ def run_sequencing_analysis(
                 eq_zs=list(re_z),
                 inf_returns=list(re_inf) if inputs.stochastic_inflation else None,
             )
-            bridge_vals.append(result.bridge)
-            min_vals.append(result.min_bridge)
+            # Real (today's dollars) using each trial's own deflators (M3)
+            bridge_vals.append(result.bridge / result.horizon_deflator)
+            min_vals.append(result.min_bridge / result.floor_deflator)
 
-        # Deflate and compute
-        deflator = (1 + inputs.inflation) ** n_years
-        bridge_vals = [v / deflator for v in bridge_vals]
-        min_vals = [v / deflator for v in min_vals]
         bridge_vals.sort()
         min_vals.sort()
 
         n = len(bridge_vals)
         p_succ = sum(1 for b in min_vals if b > 0) / n
 
-        def _pct(p: int) -> float:
-            return bridge_vals[min(int(round(n * p / 100)), n - 1)]
-
         return SimulationResults(
             trials=n,
             p_success=p_succ,
             bridge_mean=sum(bridge_vals) / n,
-            bridge_median=bridge_vals[n // 2],
-            bridge_p5=_pct(5),
-            bridge_p10=_pct(10),
-            bridge_p25=_pct(25),
-            bridge_p75=_pct(75),
-            bridge_p90=_pct(90),
-            bridge_p95=_pct(95),
+            bridge_median=_percentile(bridge_vals, 50),
+            bridge_p5=_percentile(bridge_vals, 5),
+            bridge_p10=_percentile(bridge_vals, 10),
+            bridge_p25=_percentile(bridge_vals, 25),
+            bridge_p75=_percentile(bridge_vals, 75),
+            bridge_p90=_percentile(bridge_vals, 90),
+            bridge_p95=_percentile(bridge_vals, 95),
             bridge_min=bridge_vals[0],
             bridge_floor=min_vals[0],
             floor_age=0,
@@ -1707,9 +2093,9 @@ def run_scenario_comparison(
             employment_type="not_employed",
             self_employed_income=0.0,
         )
-        new_earners = list(household.earners)
-        new_earners[i] = new_e
-        hh_stop = dc_replace(household, earners=tuple(new_earners))
+        earners_list = list(household.earners)
+        earners_list[i] = new_e
+        hh_stop = dc_replace(household, earners=tuple(earners_list))
         inp_stop = dc_replace(inputs, household=hh_stop, n_iterations=n_trials)
         _run(hh_stop, inp_stop, label)
 
@@ -1738,6 +2124,9 @@ def run_scenario_comparison(
 # EARLIEST FEASIBLE RETIREMENT AGE  (Work Item 9, opt-in, single-earner only)
 # =============================================================================
 
+_NEVER_RETIRE = 999
+"""Retirement-age sentinel meaning "never retires"."""
+
 
 @dataclass
 class RetirementSearchResult:
@@ -1756,6 +2145,27 @@ class RetirementSearchResult:
     entered_ages_by_earner: dict[str, int] = field(default_factory=dict)
     """All earners' current retirement ages at time of search."""
 
+    # ── H4 — failure-mode reporting and non-monotonicity detection ──────
+    entered_plan_feasible: bool = True
+    """True if the household's entered plan already meets the threshold
+    (within the Monte Carlo tolerance)."""
+    feasible: bool = True
+    """True if at least one scanned age met the threshold. When False, no age
+    in ``[floor_age, entered_age]`` was feasible and ``earliest_age`` is a
+    sentinel (``floor_age - 1``) rather than the entered age."""
+    earliest_feasible_age: int | None = None
+    """Lowest scanned age meeting the threshold, or ``None`` if none did."""
+    non_monotonic: bool = False
+    """True if success probability was not monotone across the scanned range
+    (a lower age passed while a higher age failed), so the scan cannot be
+    trusted to have stopped at a clean boundary."""
+    non_monotonic_ages: list[int] = field(default_factory=list)
+    """The (lower, higher) age pair of the first detected inversion."""
+    evaluated_ages: dict[int, float] = field(default_factory=dict)
+    """age -> p_success for every age evaluated, including the entered age."""
+    tolerance: float = 0.0
+    """Monte Carlo noise tolerance used when classifying pass/fail."""
+
 
 def run_retirement_search(
     household: Household,
@@ -1763,109 +2173,146 @@ def run_retirement_search(
     seed: int | None = None,
     n_trials: int = 10_000,
     min_search_age: int = 40,
-    success_threshold: float = 0.95,
+    success_threshold: float | None = None,
     mode: str = "both_together",
     target_earner_index: int = 0,
 ) -> RetirementSearchResult:
-    """Find the earliest retirement age meeting the success threshold.
+    """Scan for the earliest retirement age meeting the success threshold.
+
+    This is a **descending linear scan**, not a binary search: it evaluates
+    every age from ``entered_age`` down to ``search_floor`` at the fixed
+    ``n_trials`` sample size. The full range is evaluated (no early break)
+    so a non-monotone success curve can be detected and reported rather than
+    silently trusted.
 
     Two modes:
 
-    ``"both_together"`` (default): search for the earliest age ALL earners
-    can retire at simultaneously. The search starts from
-    ``max(current retirement ages)`` and scans downward.
+    ``"both_together"`` (default): the earliest age ALL earners can retire
+    at simultaneously. Earners with a ``999`` (never-retire) sentinel are
+    left unchanged.
 
-    ``"per_earner"``: search for how early a single earner could retire
-    while holding all other earners at their current ages.
+    ``"per_earner"``: how early a single earner could retire while holding
+    all other earners at their current ages.
+
+    The objective is a finite-sample success *rate*, which is not guaranteed
+    monotone in age (CGT and other policy effects are recomputed each year),
+    so ages are classified against ``threshold - tolerance`` where
+    ``tolerance`` is 1.5 binomial standard errors of the estimate.
 
     Args:
         household: Household definition.
         inputs: Base simulation parameters.
         seed: Random seed.
-        n_trials: Trials per age search (default 10,000).
+        n_trials: Trials per age evaluated (default 10,000).
         min_search_age: Lowest age to test.
-        success_threshold: Minimum acceptable success probability.
+        success_threshold: Minimum acceptable success probability. If
+            ``None`` (default), ``inputs.success_threshold`` is used (H8a);
+            passing an explicit value overrides the inputs.
         mode: "both_together" or "per_earner".
         target_earner_index: Index of earner to optimise (per_earner mode only).
 
     Returns:
-        ``RetirementSearchResult`` with entered vs earliest feasible age.
+        ``RetirementSearchResult``. ``entered_plan_feasible`` distinguishes
+        "the entered plan already fails" from ``feasible`` = "no age in range
+        meets the threshold"; ``non_monotonic`` flags an inverted pass/fail
+        boundary. When no age is feasible, ``earliest_feasible_age`` is
+        ``None`` and ``earliest_age`` is the sentinel ``floor_age - 1``.
 
     """
     from dataclasses import replace as dc_replace
 
+    # H8a — honour the configured threshold unless explicitly overridden.
+    if success_threshold is None:
+        success_threshold = inputs.success_threshold
+
     # Common: capture all earners' current ages for display context
     entered_ages_by_earner = {e.label: e.retirement_age for e in household.earners}
+
+    search_floor = max(min_search_age, inputs.simulation_start_age + 5)
+
+    # Monte Carlo noise tolerance for classifying pass/fail (1.5 binomial SE).
+    std_err = math.sqrt(max(success_threshold * (1.0 - success_threshold), 1e-12) / n_trials)
+    tolerance = 1.5 * std_err
+    pass_floor = success_threshold - tolerance
+
+    def _evaluate(hh: Household) -> float:
+        inp = dc_replace(inputs, household=hh, n_iterations=n_trials)
+        return run_monte_carlo(hh, inp, seed=seed).p_success
+
+    def _candidate(test_age: int) -> Household:
+        if mode == "per_earner":
+            new_earners = list(household.earners)
+            new_earners[target_earner_index] = dc_replace(
+                household.earners[target_earner_index], retirement_age=test_age
+            )
+            return dc_replace(household, earners=tuple(new_earners))
+        # both_together: never overwrite the 999 never-retire sentinel
+        updated = tuple(
+            dc_replace(e, retirement_age=test_age) if e.retirement_age < _NEVER_RETIRE else e
+            for e in household.earners
+        )
+        return dc_replace(household, earners=updated)
 
     if mode == "per_earner":
         target = household.earners[target_earner_index]
         entered_age = target.retirement_age
+        target_label: str | None = target.label
+    else:
+        non_never = [
+            e.retirement_age for e in household.earners if e.retirement_age < _NEVER_RETIRE
+        ]
+        entered_age = max(non_never) if non_never else inputs.simulation_start_age
+        target_label = None
 
-        # Baseline run with all earners at their current ages
-        base_inp = dc_replace(inputs, n_iterations=n_trials)
-        base_result = run_monte_carlo(household, base_inp, seed=seed)
-        entered_p = base_result.p_success
+    # Baseline: the household as entered (all earners at their current ages)
+    entered_p = _evaluate(household)
 
-        search_floor = max(min_search_age, inputs.simulation_start_age + 5)
-        earliest = entered_age
-        earliest_p = entered_p
-
-        for test_age in range(entered_age - 1, search_floor - 1, -1):
-            new_earners = list(household.earners)
-            new_earners[target_earner_index] = dc_replace(target, retirement_age=test_age)
-            new_hh = dc_replace(household, earners=tuple(new_earners))
-            new_inp = dc_replace(inputs, household=new_hh, n_iterations=n_trials)
-
-            r = run_monte_carlo(new_hh, new_inp, seed=seed)
-            if r.p_success >= success_threshold:
-                earliest = test_age
-                earliest_p = r.p_success
-            else:
-                break
-
-        return RetirementSearchResult(
-            mode=mode,
-            entered_age=entered_age,
-            entered_p_success=entered_p,
-            earliest_age=earliest,
-            earliest_p_success=earliest_p,
-            target_earner_label=target.label,
-            entered_ages_by_earner=entered_ages_by_earner,
-            floor_age=search_floor,
-            threshold=success_threshold,
-        )
-
-    # both_together mode (default)
-    entered_age = max(e.retirement_age for e in household.earners)
-
-    # Baseline run with all earners at their current ages
-    base_inp = dc_replace(inputs, n_iterations=n_trials)
-    base_result = run_monte_carlo(household, base_inp, seed=seed)
-    entered_p = base_result.p_success
-
-    search_floor = max(min_search_age, inputs.simulation_start_age + 5)
-    earliest = entered_age
-    earliest_p = entered_p
-
+    # Scan the full range (no early break) to detect non-monotonicity (H4b)
+    evaluated_ages: dict[int, float] = {entered_age: entered_p}
     for test_age in range(entered_age - 1, search_floor - 1, -1):
-        new_earners = tuple(dc_replace(e, retirement_age=test_age) for e in household.earners)
-        new_hh = dc_replace(household, earners=new_earners)
-        new_inp = dc_replace(inputs, household=new_hh, n_iterations=n_trials)
+        evaluated_ages[test_age] = _evaluate(_candidate(test_age))
 
-        r = run_monte_carlo(new_hh, new_inp, seed=seed)
-        if r.p_success >= success_threshold:
-            earliest = test_age
-            earliest_p = r.p_success
-        else:
+    # Classify pass/fail and find inversions
+    ages_asc = sorted(evaluated_ages)
+    passes = [evaluated_ages[a] >= pass_floor for a in ages_asc]
+    passing = [a for a, ok in zip(ages_asc, passes) if ok]
+    feasible = bool(passing)
+    earliest_feasible: int | None = min(passing) if passing else None
+
+    non_monotonic_ages: list[int] = []
+    for i, lower_age in enumerate(ages_asc):
+        if not passes[i]:
+            continue
+        for j in range(i + 1, len(ages_asc)):
+            if not passes[j]:
+                non_monotonic_ages = [lower_age, ages_asc[j]]
+                break
+        if non_monotonic_ages:
             break
+
+    if earliest_feasible is not None:
+        earliest_age = earliest_feasible
+        earliest_p = evaluated_ages[earliest_feasible]
+    else:
+        # Sentinel: never report the entered age as "feasible" when it isn't
+        earliest_age = search_floor - 1
+        earliest_p = entered_p
 
     return RetirementSearchResult(
         mode=mode,
         entered_age=entered_age,
         entered_p_success=entered_p,
-        earliest_age=earliest,
+        earliest_age=earliest_age,
         earliest_p_success=earliest_p,
+        target_earner_label=target_label,
         entered_ages_by_earner=entered_ages_by_earner,
         floor_age=search_floor,
         threshold=success_threshold,
+        entered_plan_feasible=entered_p >= pass_floor,
+        feasible=feasible,
+        earliest_feasible_age=earliest_feasible,
+        non_monotonic=bool(non_monotonic_ages),
+        non_monotonic_ages=non_monotonic_ages,
+        evaluated_ages=evaluated_ages,
+        tolerance=tolerance,
     )

@@ -30,8 +30,8 @@ DoneByFifty runs thousands of simulated futures. The output isn't just whether a
 **Risk analysis.**
 - Sequencing risk analysis re-orders return histories (worst-first versus best-first) to isolate how much return order, as distinct from return level, affects bridge viability
 - Scenario comparison runs the same household under alternative assumptions, such as no part-time income or full offset drawdown, and sets the results out side by side
-- Bootstrap standard errors use 200 resamples with colour-coded relative SE, so you can tell when a result needs more trials before you trust it
-- Earliest-feasible-retirement-age search: binary-searches over retirement age to find the youngest age that still meets your success threshold
+- Bootstrap standard errors use at least 1,000 resamples with colour-coded relative SE, so you can tell when a result needs more trials before you trust it
+- Earliest-feasible-retirement-age search: scans every age over the search range (not a binary search — the success rate is not guaranteed monotone) and reports the youngest age meeting your threshold, flagging non-monotonicity and distinguishing "no feasible age" from "entered plan infeasible"
 - Drawdown composition tracking: a per-year breakdown of offset versus non-offset funding and CGT paid, with running totals across the bridge
 
 ---
@@ -41,15 +41,15 @@ DoneByFifty runs thousands of simulated futures. The output isn't just whether a
 ```bash
 # Clone and enter the repo
 git clone <repo-url>
-cd montecarlo-cli
+cd donebyfifty
 
 # Create a venv and install (Python 3.11+)
 python -m venv .venv
 .venv\Scripts\activate   # or source .venv/bin/activate on Unix
-pip install -e .
+pip install -e ".[dev]"
 
-# Run the interactive TUI
-python main.py
+# Run the interactive TUI (modules use flat imports, so run the file directly)
+python src/donebyfifty/main.py
 ```
 
 The menu walks you through:
@@ -87,18 +87,18 @@ Results are seed-locked, so a given set of inputs and seed will always reproduce
 
 ## Asset Return Assumptions
 
-All returns are real (inflation-adjusted). The simulation compounds in real terms and applies a deflator at output.
+All return parameters are real (inflation-adjusted). Each year's draw is uplifted to nominal — `(1 + real) × (1 + inflation) − 1` — so it can be applied to the model's nominal cash flows; the output is then deflated back to today's dollars. This keeps the result invariant to the inflation assumption when real inputs are held fixed.
 
 | Asset Class | Real Return (μ) | Volatility (σ) | Confidence |
 |---|---|---|---|
 | Australian Equity | 7.0% | 15.0% | Sourced: Credit Suisse/UBS Global Investment Returns Yearbook (since 1900 ≈ 6.4–6.7%) |
-| International Equity | 7.0% | 17.0% | Assumed|
-| Bonds | 3.0% | 5.0% | Sourced: RBA Bulletin (Fraser 1991, ~1.5% real to 1990); current figure sits above historical |
-| Cash | 2.5% | 2.0% | Derived estimate; sits at upper edge of 1–2% range implied by sources |
+| International Equity | 6.5% | 16.0% | Assumed (unsourced placeholder) |
+| Bonds | 3.0% | 6.0% | Sourced: RBA Bulletin (Fraser 1991, ~1.5% real to 1990); current figure sits above historical |
+| Cash | 2.5% | 1.0% | Derived estimate; sits at upper edge of 1–2% range implied by sources |
 | Property | 5.0% | 12.0% | Derived: CoreLogic capital growth ~3.5–4% real plus estimated net rental yield ~2–3% |
-| Super (equity-like) | 7.0% | 15.0% | Assumed |
+| Super (equity-like) | 7.0% | 12.0% | Assumed (unsourced placeholder) |
 
-All volatility figures are unsourced placeholders. The correlation matrix lives in `primitives.py`: equity/property 0.7, equity/bonds −0.2, and so on.
+All volatility figures are unsourced placeholders. Correlations live in `primitives.py` as `corr_with_eq` per asset class: equity/property 0.60, equity/bonds 0.10, equity/intl 0.70, equity/cash 0.0. The implementation builds each non-equity asset pairwise against equity rather than from one shared matrix, so the mutual correlation of two non-equity assets is the product of their equity correlations, not a directly specified value; and the correlation parameter is that of the underlying log-returns, not of the returns themselves.
 
 ---
 
@@ -116,7 +116,11 @@ The implementation uses the exact discretisation of the underlying Ornstein-Uhle
 
 ### CGT: indexation and the 30% floor, not indexation and the discount
 
-The Treasury reform replaces the old 50% CGT discount with CPI-indexed cost basis, and the two mechanisms aren't applied together. Applying both would understate tax for high earners, so the model applies indexation only: earners in the 37% and 45% brackets pay their full marginal rate (subject to the 30% floor) on real gains, with no residual discount. This was verified line-by-line against the policy text rather than assumed. The CGT algorithm also handles cost-basis proportioning (only the gain fraction of each sale is taxed), gross-up for tax (solving for the pre-tax sale amount needed to net the required after-tax spending, rather than treating the after-tax figure as the sale amount), and per-owner weighted averaging for jointly held accounts.
+The Treasury reform replaces the old 50% CGT discount with CPI-indexed cost basis, and the two mechanisms aren't stacked on the same portion of a gain. Post-reform gains are indexed from the date the cost was incurred and taxed at marginal rates subject to a 30% floor; pre-reform gains keep the 50% discount. For an asset held across 30 June 2027 the gain is split at the reform line (Subdiv 112-E deemed disposal at market value), with each portion taxed under its own regime.
+
+The CGT algorithm also handles cost-basis proportioning (only the gain fraction of each sale is taxed), gross-up for tax (solving for the pre-tax sale amount needed to net the required after-tax spending, rather than treating the after-tax figure as the sale amount), and per-owner treatment of jointly held accounts: the gain is stacked on each owner's own income and taxed by integrating the bracket schedule, preserving the per-owner 30% floor.
+
+Not modelled (documented rather than silently ignored): the new-build 50% discount election, and the s119-15 minimum-tax exemption list.
 
 ### RNG isolation
 
@@ -128,7 +132,7 @@ Where policy is ambiguous or the real-world outcome depends on taxpayer behaviou
 
 ### Golden-value verification
 
-Two deterministic end-to-end tests check the model against hand calculations: a single-earner scenario whose bridge and super values match independently computed figures to the dollar, and a CGT drawdown scenario that confirms the bridge stays positive through a full drawdown under known tax parameters.
+A deterministic end-to-end test checks the model against a hand calculation: a single-earner scenario whose bridge and super values match independently computed figures to the dollar. A second deterministic scenario exercises a full CGT drawdown and checks the bridge stays positive under known tax parameters (it is a sanity check, not a hand calculation).
 
 ---
 
@@ -137,11 +141,13 @@ Two deterministic end-to-end tests check the model against hand calculations: a 
 | Mechanism | Implementation |
 |---|---|
 | **Marginal rates** | 5-bracket schedule (0%, 16%, 30%, 37%, 45%), indexed annually at configured rate |
-| **Medicare Levy** | 2% on taxable income, with low-income phase-in thresholds |
-| **Medicare Levy Surcharge** | Tiered 1.0–1.5% on singles/couples by income band |
+| **Medicare Levy** | 2% on taxable income, with the low-income reduction (no levy below ~$28,011; 10% of the excess to ~$35,013) |
+| **Low Income Tax Offset** | Standard phase-out: $700 to $37,500, tapering to zero at ~$66,667 |
+| **Medicare Levy Surcharge** | Tiered 1.0–1.5% on singles/family by income band (FY2026-27 thresholds) |
 | **Division 293** | 15% additional tax on concessional contributions above $250k combined income (statutory, not indexed) |
-| **Concessional cap** | $30,000 base, optionally indexed, with auto-sacrifice logic |
-| **CGT (post-2027)** | 30% floor rate on real gains, tax withheld at disposal, cost-basis tracking |
+| **Concessional cap** | $32,500 base, optionally indexed, with auto-sacrifice logic |
+| **SG maximum base** | $270,830 (FY2026-27) |
+| **CGT (post-2027)** | CPI-indexed cost base, 30% floor rate on real gains, per-owner bracket stacking, 30 Jun 2027 transitional split |
 | **SG** | 12% mandatory employer contribution on salary up to max base |
 
 ---
@@ -164,7 +170,7 @@ pip install -e ".[dev]"
 ### Testing
 
 ```bash
-# Full suite (~170 tests)
+# Full suite (~185 tests)
 pytest tests/ -q
 
 # Exclude slow integration tests
@@ -181,7 +187,7 @@ Test categories:
 - **`test_simulation.py`** — engine integration, deterministic output, scenario analysis
 - **`test_golden_values.py`** — hand-calculated reference cases that lock in numerical correctness
 - **`test_ui.py`** — input validation, warning generation
-- **`regression.py`** — diff-based regression harness for output stability
+- **`test_regression.py`** — wraps the `regression.py` reference harness (range/ordering invariants for the reference household) so it runs under pytest
 
 ### Code Quality Gates
 
@@ -191,10 +197,10 @@ All gates must pass before committing:
 mypy . --strict && ruff check . && black --check . && pytest tests/ -q
 ```
 
-- `mypy --strict`: zero errors on all production modules
+- `pytest`: the full suite passes
 - `ruff`: zero violations
-- `black`: all files conform
-- `pytest`: 170/171 passing (1 pre-existing flaky test unrelated to core engine)
+- `mypy --strict`: no errors attributable to a change (a small amount of pre-existing type debt remains, tracked separately)
+- `black`: formatting is not currently enforced in CI; the repo follows the 100-column style configured in `pyproject.toml`
 
 ---
 

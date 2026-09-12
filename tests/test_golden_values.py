@@ -128,7 +128,7 @@ def test_golden_simple_cgt() -> None:
     Single earner working through the bridge, with an investment account
     that must be drawn down to cover expenses. Deterministic returns.
     """
-    from models import InvestmentAccount
+    from models import InvestmentAccount, Ownership
 
     earner = Earner(
         label="Test",
@@ -147,7 +147,7 @@ def test_golden_simple_cgt() -> None:
         asset_class="equity",
         interest_rate=0.07,  # Custom mean 7% return (fixed in deterministic mode)
         cgt_rate=0.30,
-        ownership={0: 1.0},
+        ownership=Ownership({0: 1.0}),
     )
     household = Household(
         earners=(earner,),

@@ -12,6 +12,13 @@ build = [
     "pyinstaller>=6.0",
     "pyinstaller-hooks-contrib",
 ]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov",
+    "mypy>=1.10",
+    "ruff>=0.5",
+    "black>=24.0",
+]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

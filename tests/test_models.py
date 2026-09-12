@@ -7,7 +7,6 @@ and backward compatibility with v1 profile format.
 from __future__ import annotations
 
 import pytest
-
 from models import (
     Child,
     Earner,
