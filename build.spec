@@ -26,6 +26,10 @@ from pathlib import Path
 ROOT = Path().resolve()
 SRC = ROOT / "src" / "donebyfifty"
 
+# ── Icon: only applied on Windows, where PyInstaller supports it. On
+#    Linux/macOS an .ico is not a valid executable icon, so omit it. ───
+ICON = str(ROOT / "assets" / "icon.ico") if sys.platform == "win32" else None
+
 # ── Block modules not needed by this app ───────────────────────────────
 EXCLUDES = [
     "PIL",           # Pillow — pulled by Pygments optional deps, never used here
@@ -84,7 +88,7 @@ exe = EXE(
     a.datas,
     [],
     name="montecarlo-cli",
-    icon=str(ROOT / "assets" / "icon.ico"),
+    icon=ICON,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
