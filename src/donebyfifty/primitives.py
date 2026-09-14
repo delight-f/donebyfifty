@@ -355,12 +355,16 @@ def medicare_levy(
         add-on is the commonly cited ~$1,500/child.
 
     """
-    lower = MEDICARE_LOW_INCOME_THRESHOLD + (
-        MEDICARE_FAMILY_UPLIFT if has_spouse else 0.0
-    ) + MEDICARE_CHILD_UPLIFT * dependants
-    upper = MEDICARE_LOW_INCOME_UPPER + (
-        MEDICARE_FAMILY_UPLIFT if has_spouse else 0.0
-    ) + MEDICARE_CHILD_UPLIFT * dependants
+    lower = (
+        MEDICARE_LOW_INCOME_THRESHOLD
+        + (MEDICARE_FAMILY_UPLIFT if has_spouse else 0.0)
+        + MEDICARE_CHILD_UPLIFT * dependants
+    )
+    upper = (
+        MEDICARE_LOW_INCOME_UPPER
+        + (MEDICARE_FAMILY_UPLIFT if has_spouse else 0.0)
+        + MEDICARE_CHILD_UPLIFT * dependants
+    )
     full_levy = taxable_income * MEDICARE
     if taxable_income <= lower:
         return 0.0
@@ -590,13 +594,7 @@ def validate_correlations(rho_se: float, rho_ei: float, rho_si: float) -> None:
             f"rho_se={rho_se!r} makes the correlation matrix singular "
             "(division by sqrt(1 - rho_se**2))"
         )
-    determinant = (
-        1.0
-        + 2.0 * rho_se * rho_ei * rho_si
-        - rho_se**2
-        - rho_ei**2
-        - rho_si**2
-    )
+    determinant = 1.0 + 2.0 * rho_se * rho_ei * rho_si - rho_se**2 - rho_ei**2 - rho_si**2
     if determinant < -1e-12:
         raise ValueError(
             "correlation matrix is not positive semi-definite "

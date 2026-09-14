@@ -73,6 +73,7 @@ def _wilson_interval(p: float, n: int, z: float = 1.96) -> tuple[float, float]:
     spread = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / denom
     return (max(0.0, centre - spread), min(1.0, centre + spread))
 
+
 # =============================================================================
 # CONSOLE
 # =============================================================================
@@ -979,8 +980,10 @@ def _configure_accounts_section(
     # Determine earner count and labels for ownership split prompt.
     # Use the freshly built earners when provided (H1 fix); fall back to
     # the existing household for backward compatibility with edit_household.
-    active_earners = earners if earners is not None else (
-        existing.earners if existing and existing.earners else (Earner(),)
+    active_earners = (
+        earners
+        if earners is not None
+        else (existing.earners if existing and existing.earners else (Earner(),))
     )
     n_earners = len(active_earners)
     earner_labels = [e.label for e in active_earners]
@@ -1534,9 +1537,7 @@ def display_results(
         tc_color = (
             THEME_COLOR_BRIGHT
             if tc_rate >= 0.9
-            else THEME_COLOR_ERROR
-            if tc_rate < 0.5
-            else THEME_COLOR_WARN
+            else THEME_COLOR_ERROR if tc_rate < 0.5 else THEME_COLOR_WARN
         )
         console.print(f"  Mortgage term clearance: [bold {tc_color}]{tc_rate * 100:.1f}%[/]")
         if tc_rate < 1.0:
@@ -1830,7 +1831,9 @@ def review_before_run(
             if len(household.earners) > 1 and not a.is_offset and len(a.ownership) > 1:
                 for ei, share in sorted(a.ownership.items()):
                     if share > 0 and ei < len(household.earners):
-                        owner_parts.append(f"{escape(household.earners[ei].label)} {share * 100:.0f}%")
+                        owner_parts.append(
+                            f"{escape(household.earners[ei].label)} {share * 100:.0f}%"
+                        )
             owner_str = f" — {' / '.join(owner_parts)}" if owner_parts else ""
             hh_lines.append(f"  {escape(a.label)}: ${a.market_value:,.0f}{tag}{owner_str}")
     hh_lines.append(
@@ -2171,7 +2174,9 @@ def _view_drawdown_composition(session: ResultsSession) -> None:
     table.add_column("CGT paid", justify="right", style=THEME_COLOR)
 
     # M15 fix: guard by minimum length across all series
-    n_rows = min(len(ages), len(r.offset_drawn_p50), len(r.non_offset_drawn_p50), len(r.cgt_paid_p50))
+    n_rows = min(
+        len(ages), len(r.offset_drawn_p50), len(r.non_offset_drawn_p50), len(r.cgt_paid_p50)
+    )
     for i in range(n_rows):
         off = r.offset_drawn_p50[i]
         non = r.non_offset_drawn_p50[i]
@@ -2206,9 +2211,7 @@ def _view_drawdown_composition(session: ResultsSession) -> None:
     has_per_trial = offset_total_p50 != 0.0 or non_offset_total_p50 != 0.0 or cgt_total_p50 != 0.0
     if has_per_trial:
         # True quantiles of per-trial totals
-        console.print(
-            "  [bold]Total across bridge (per-trial quantiles, today's dollars):[/]"
-        )
+        console.print("  [bold]Total across bridge (per-trial quantiles, today's dollars):[/]")
         console.print(
             f"    Offset drawn:     P5 {_fmt_dollar(offset_total_p5)}"
             f"  |  Median {_fmt_dollar(offset_total_p50)}"
@@ -2321,11 +2324,7 @@ def _view_cgt_breakdown(session: ResultsSession) -> None:
             f"  |  P95 {_fmt_dollar(cgt_extra_p95)}"
         )
         if cgt_extra_p50 > 0:
-            pct_increase = (
-                cgt_extra_p50 / cgt_nofloor_p50 * 100
-                if cgt_nofloor_p50 > 0
-                else 0.0
-            )
+            pct_increase = cgt_extra_p50 / cgt_nofloor_p50 * 100 if cgt_nofloor_p50 > 0 else 0.0
             console.print(
                 f"  [dim](median extra CGT = {pct_increase:.1f}% increase over"
                 f" marginal-rate-only)[/]"
@@ -2336,10 +2335,10 @@ def _view_cgt_breakdown(session: ResultsSession) -> None:
         total_without_floor = sum(r.cgt_without_floor_p50)
         floor_cost = total_with_floor - total_without_floor
         if floor_cost > 0:
-            pct_increase = (floor_cost / total_without_floor * 100) if total_without_floor > 0 else 0.0
-            console.print(
-                "  [bold]Total CGT (sum of per-year medians — not a true quantile):[/]"
+            pct_increase = (
+                (floor_cost / total_without_floor * 100) if total_without_floor > 0 else 0.0
             )
+            console.print("  [bold]Total CGT (sum of per-year medians — not a true quantile):[/]")
             console.print(f"    With 30% floor: {_fmt_dollar(total_with_floor)}")
             console.print(f"    Without floor:  {_fmt_dollar(total_without_floor)}")
             console.print(
@@ -2528,9 +2527,13 @@ def _view_retirement_search(session: ResultsSession) -> None:
             pass  # use cached
         else:
             fixed_info = [
-                f"{escape(e.label)} at {e.retirement_age}" for i, e in enumerate(earners) if i != target_idx
+                f"{escape(e.label)} at {e.retirement_age}"
+                for i, e in enumerate(earners)
+                if i != target_idx
             ]
-            console.print(f"  [dim]Searching for earliest retirement age for {escape(target_label)}...[/]")
+            console.print(
+                f"  [dim]Searching for earliest retirement age for {escape(target_label)}...[/]"
+            )
             console.print(f"  [dim]Others held fixed: {', '.join(fixed_info)}.[/]")
             if not _prompt_yn(
                 "Run search? This will run several full simulations and may take 2-3 minutes.",
@@ -2584,7 +2587,9 @@ def _display_retirement_search_result(rs: RetirementSearchResult) -> None:
     else:
         # both_together or single earner
         if len(rs.entered_ages_by_earner) > 1:
-            age_parts = [f"{escape(label)}: {age}" for label, age in rs.entered_ages_by_earner.items()]
+            age_parts = [
+                f"{escape(label)}: {age}" for label, age in rs.entered_ages_by_earner.items()
+            ]
             console.print(f"  Current retirement ages: {'; '.join(age_parts)}")
         console.print(
             f"  Your entered retirement age: {rs.entered_age}"

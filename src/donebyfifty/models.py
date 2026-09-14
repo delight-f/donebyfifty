@@ -101,6 +101,7 @@ class Ownership(Mapping[int, float]):
         """Return a plain dict copy for serialisation."""
         return dict(self._data)
 
+
 # =============================================================================
 # AUSTRALIAN PRESERVATION AGE LOOKUP
 # =============================================================================
@@ -371,17 +372,13 @@ class Earner:
         # Bounds are chosen to accept every value the UI can produce; see
         # ui.py prompt ranges (salary_growth -5..15%, sg 0..20%, etc.).
         if not 0.0 <= self.super_growth_pct <= 100.0:
-            raise ValueError(
-                f"super_growth_pct must be 0–100 (got {self.super_growth_pct})"
-            )
+            raise ValueError(f"super_growth_pct must be 0–100 (got {self.super_growth_pct})")
         if not 0.0 <= self.super_glide_target_pct <= 100.0:
             raise ValueError(
                 f"super_glide_target_pct must be 0–100 (got {self.super_glide_target_pct})"
             )
         if self.salary_growth_rate < -1.0:
-            raise ValueError(
-                f"salary_growth_rate must be ≥ -1.0 (got {self.salary_growth_rate})"
-            )
+            raise ValueError(f"salary_growth_rate must be ≥ -1.0 (got {self.salary_growth_rate})")
         if self.self_employed_growth_rate < -1.0:
             raise ValueError(
                 f"self_employed_growth_rate must be ≥ -1.0 (got {self.self_employed_growth_rate})"
@@ -555,13 +552,10 @@ class InvestmentAccount:
             )
         for ei, share in self.ownership.items():
             if ei < 0:
-                raise ValueError(
-                    f"Account '{self.label}' has negative earner index {ei}."
-                )
+                raise ValueError(f"Account '{self.label}' has negative earner index {ei}.")
             if share < 0:
                 raise ValueError(
-                    f"Account '{self.label}' has negative share {share} for "
-                    f"earner {ei}."
+                    f"Account '{self.label}' has negative share {share} for " f"earner {ei}."
                 )
         # Unit validation: _rate fields are 0–1.0.  Bounds accept every value
         # the UI can produce (interest_rate 0–20%, cgt_rate 0.30, fee_rate 0).
@@ -702,19 +696,13 @@ class SimulationInputs:
         if not 0.0 <= self.mls_rate <= 1.0:
             raise ValueError(f"mls_rate must be 0–1 (got {self.mls_rate})")
         if not 0.0 <= self.bracket_growth_rate <= 1.0:
-            raise ValueError(
-                f"bracket_growth_rate must be 0–1 (got {self.bracket_growth_rate})"
-            )
+            raise ValueError(f"bracket_growth_rate must be 0–1 (got {self.bracket_growth_rate})")
         if not 0.0 <= self.div293_rate <= 1.0:
             raise ValueError(f"div293_rate must be 0–1 (got {self.div293_rate})")
         if not 0.0 <= self.div293_growth_rate <= 1.0:
-            raise ValueError(
-                f"div293_growth_rate must be 0–1 (got {self.div293_growth_rate})"
-            )
+            raise ValueError(f"div293_growth_rate must be 0–1 (got {self.div293_growth_rate})")
         if not 0.0 <= self.conc_cap_growth_rate <= 1.0:
-            raise ValueError(
-                f"conc_cap_growth_rate must be 0–1 (got {self.conc_cap_growth_rate})"
-            )
+            raise ValueError(f"conc_cap_growth_rate must be 0–1 (got {self.conc_cap_growth_rate})")
         if not 0.0 <= self.sg_max_base_growth_rate <= 1.0:
             raise ValueError(
                 f"sg_max_base_growth_rate must be 0–1 (got {self.sg_max_base_growth_rate})"

@@ -590,9 +590,7 @@ def simulate_working_year(
         state.account_bases[target_idx] = new_acct_basis
         # H5 — an overflow sweep adds basis incurred this year, as its own lot.
         if overflow_basis > 0 and target_idx < len(state.account_lots):
-            state.account_lots[target_idx].append(
-                {"basis": overflow_basis, "incurred": state.year}
-            )
+            state.account_lots[target_idx].append({"basis": overflow_basis, "incurred": state.year})
 
     # ── 7. Grow investment accounts (custom interest rates if specified) ────
     for ai, account in enumerate(household.investment_accounts):
@@ -621,8 +619,11 @@ def simulate_working_year(
             else:
                 # Use asset class returns
                 asset_return = generate_asset_return(
-                    account.asset_class, eq_z, eq_return, deterministic=deterministic,
-                    inflation=per_year_infl
+                    account.asset_class,
+                    eq_z,
+                    eq_return,
+                    deterministic=deterministic,
+                    inflation=per_year_infl,
                 )
             state.account_values[ai] *= 1.0 + asset_return
         # Offset accounts do NOT grow — benefit is via reduced mortgage interest
@@ -769,9 +770,11 @@ def _drawdown(
         if cgt_on and state.earner_taxable_incomes:
             owners = [
                 (
-                    state.earner_taxable_incomes[ei]
-                    if ei < len(state.earner_taxable_incomes)
-                    else 0.0,
+                    (
+                        state.earner_taxable_incomes[ei]
+                        if ei < len(state.earner_taxable_incomes)
+                        else 0.0
+                    ),
                     share,
                 )
                 for ei, share in account.ownership.items()
@@ -786,9 +789,7 @@ def _drawdown(
                 # Post-reform portion: proceeds less the reform-line basis
                 # indexed from 30 June 2027 (each lot from its own year).
                 lots = state.account_lots[ai] if ai < len(state.account_lots) else []
-                post_basis = indexed_cost_base(
-                    lots, state.year, state.cumulative_inflation_by_year
-                )
+                post_basis = indexed_cost_base(lots, state.year, state.cumulative_inflation_by_year)
                 post_gain = max(0.0, asset["val"] - post_basis)
                 split_tax, split_tax_raw = cgt_split_tax(owners, pre_gain, post_gain)
                 weighted_rate = split_tax / nominal_gain
@@ -1102,9 +1103,7 @@ def run_single_trial(
             # year — so later indexation runs from 2027, not from year 0.
             for ai, mv in enumerate(state.account_values):
                 if ai < len(state.account_lots):
-                    state.account_lots[ai] = (
-                        [{"basis": mv, "incurred": y}] if mv > 0 else []
-                    )
+                    state.account_lots[ai] = [{"basis": mv, "incurred": y}] if mv > 0 else []
 
         # Capture per-year trajectory in today's dollars (M3: deflate by the
         # factor prevailing in that year, so it is comparable to the
@@ -1454,8 +1453,7 @@ def run_monte_carlo(
                 inf_returns.append(inf_r)
             else:
                 eq_r, _super_r, eq_z = generate_correlated_returns(
-                    rho=SUPER_EQ_CORR, return_z=True, rng=series_rng,
-                    inflation=inputs.inflation
+                    rho=SUPER_EQ_CORR, return_z=True, rng=series_rng, inflation=inputs.inflation
                 )
                 eq_returns.append(eq_r)
                 eq_zs.append(eq_z)
@@ -1480,9 +1478,7 @@ def run_monte_carlo(
         bridge_values.append(real_bridge)
         min_bridge_values.append(real_min_bridge)
         super_values.append(result.total_super / result.horizon_deflator)
-        per_earner_supers.append(
-            [s / result.horizon_deflator for s in result.super_balances]
-        )
+        per_earner_supers.append([s / result.horizon_deflator for s in result.super_balances])
         per_mortgage_remaining.append(result.mortgage_principals)
         per_mortgage_term_cleared.append(result.term_cleared)
         per_trial_totals.append(
@@ -1695,9 +1691,7 @@ def run_monte_carlo(
     bridge_median_se, bridge_median_lo, bridge_median_hi = _bootstrap_percentile(
         bridge_values, 50.0, seed=seed
     )
-    bridge_p5_se, bridge_p5_lo, bridge_p5_hi = _bootstrap_percentile(
-        bridge_values, 5.0, seed=seed
-    )
+    bridge_p5_se, bridge_p5_lo, bridge_p5_hi = _bootstrap_percentile(bridge_values, 5.0, seed=seed)
     bridge_p95_se, bridge_p95_lo, bridge_p95_hi = _bootstrap_percentile(
         bridge_values, 95.0, seed=seed
     )

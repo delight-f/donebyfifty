@@ -92,9 +92,7 @@ def save_profile(profile: Profile) -> Path:
     payload = json.dumps(profile.to_dict(), indent=2)
 
     try:
-        fd, tmp_name = tempfile.mkstemp(
-            dir=path.parent, prefix=".profile-", suffix=".tmp"
-        )
+        fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=".profile-", suffix=".tmp")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as tmp:
                 tmp.write(payload)

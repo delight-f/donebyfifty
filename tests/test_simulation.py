@@ -934,9 +934,9 @@ class TestOffsetReserveModes:
         res_stall = run_monte_carlo(h_stall, inputs)
         rem_no = res_no.remaining_mortgage_p50.get("L", 0)
         rem_stall = res_stall.remaining_mortgage_p50.get("L", 0)
-        assert rem_stall < rem_no, (
-            f"Stall-prevention remaining (${rem_stall:,.0f}) should be < no-floor (${rem_no:,.0f})"
-        )
+        assert (
+            rem_stall < rem_no
+        ), f"Stall-prevention remaining (${rem_stall:,.0f}) should be < no-floor (${rem_no:,.0f})"
 
     def test_interest_cancelling_preserves_more_than_stall(self) -> None:
         """Interest-cancelling preserves more offset than stall-prevention.
@@ -1177,9 +1177,9 @@ class TestSuccessProbabilityDisplay:
         import re
 
         chart_lines = re.findall(r"Success probability: \d+\.\d+%", output)
-        assert len(chart_lines) == 1, (
-            f"Expected 1 chart line, got {len(chart_lines)}: {chart_lines}"
-        )
+        assert (
+            len(chart_lines) == 1
+        ), f"Expected 1 chart line, got {len(chart_lines)}: {chart_lines}"
 
 
 # =============================================================================
@@ -1218,9 +1218,9 @@ class TestRealSalaryGrowth:
         assert source_file is not None
         with open(source_file) as f:
             content = f.read()
-        assert "(1 + earner.salary_growth_rate) * (1 + inputs.inflation)" in content, (
-            "Salary growth must compound real_rate with inflation."
-        )
+        assert (
+            "(1 + earner.salary_growth_rate) * (1 + inputs.inflation)" in content
+        ), "Salary growth must compound real_rate with inflation."
 
 
 # =============================================================================
@@ -1478,12 +1478,12 @@ class TestSequencingAnalysis:
             seed=42,
         )
 
-        assert seq.worst_first_p_success <= seq.original_p_success, (
-            f"worst={seq.worst_first_p_success:.3f} > original={seq.original_p_success:.3f}"
-        )
-        assert seq.original_p_success <= seq.best_first_p_success, (
-            f"original={seq.original_p_success:.3f} > best={seq.best_first_p_success:.3f}"
-        )
+        assert (
+            seq.worst_first_p_success <= seq.original_p_success
+        ), f"worst={seq.worst_first_p_success:.3f} > original={seq.original_p_success:.3f}"
+        assert (
+            seq.original_p_success <= seq.best_first_p_success
+        ), f"original={seq.original_p_success:.3f} > best={seq.best_first_p_success:.3f}"
 
     def test_worst_first_p5_lowest(self) -> None:
         """Worst-first p5 should be the lowest among all orderings."""
@@ -1498,13 +1498,13 @@ class TestSequencingAnalysis:
             seed=42,
         )
 
-        assert seq.worst_first_p5 <= seq.original_p5, (
-            f"worst p5={seq.worst_first_p5:,.0f} > original p5={seq.original_p5:,.0f}"
-        )
+        assert (
+            seq.worst_first_p5 <= seq.original_p5
+        ), f"worst p5={seq.worst_first_p5:,.0f} > original p5={seq.original_p5:,.0f}"
         # Best-first should have highest p5
-        assert seq.best_first_p5 >= seq.original_p5, (
-            f"best p5={seq.best_first_p5:,.0f} < original p5={seq.original_p5:,.0f}"
-        )
+        assert (
+            seq.best_first_p5 >= seq.original_p5
+        ), f"best p5={seq.best_first_p5:,.0f} < original p5={seq.original_p5:,.0f}"
 
     def test_result_fields_present(self) -> None:
         """Sequencing result has all six p_success/p5 fields."""
@@ -1603,9 +1603,9 @@ class TestScenarioComparison:
         )
 
         base = run_monte_carlo(household=h, inputs=inputs, seed=42)
-        assert scens["No PT income"].p_success <= base.p_success + 0.01, (
-            f"No PT ({scens['No PT income'].p_success:.3f}) > Base ({base.p_success:.3f})"
-        )
+        assert (
+            scens["No PT income"].p_success <= base.p_success + 0.01
+        ), f"No PT ({scens['No PT income'].p_success:.3f}) > Base ({base.p_success:.3f})"
 
     def test_earner_stops_working_lowers_success(self) -> None:
         """An earner stopping work should not increase success."""
@@ -1621,9 +1621,9 @@ class TestScenarioComparison:
         )
 
         for label in ("Earner 1 stops working", "Earner 2 stops working"):
-            assert scens[label].p_success <= base.p_success + 0.01, (
-                f"{label} ({scens[label].p_success:.3f}) > Base ({base.p_success:.3f})"
-            )
+            assert (
+                scens[label].p_success <= base.p_success + 0.01
+            ), f"{label} ({scens[label].p_success:.3f}) > Base ({base.p_success:.3f})"
 
     def test_expenses_higher_lowers_success(self) -> None:
         """Higher expenses should not increase success probability."""
