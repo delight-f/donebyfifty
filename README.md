@@ -137,6 +137,9 @@ mypy . --strict && ruff check . && black --check . && pytest tests/ -q
 The suite (~200 tests) covers golden values, financial primitives, property
 behaviour, engine integration, and regression invariants.
 
+CI runs all four gates on every push and pull request, on Python 3.11 and 3.12
+(`.github/workflows/ci.yml`).
+
 ## Caveats
 
 - Historical means are not forecasts. Sensitivity-test the plan.
