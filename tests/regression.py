@@ -31,13 +31,11 @@ from __future__ import annotations
 
 import sys
 import time
-from pathlib import Path
 from typing import Any
 
-# Ensure the project is on sys.path
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-from models import (
+from donebyfifty.config import EDU_SCHEDULE_TODAY
+from donebyfifty.engine import run_single_trial
+from donebyfifty.models import (
     Child,
     Earner,
     Household,
@@ -45,8 +43,7 @@ from models import (
     MortgageAccount,
     SimulationInputs,
 )
-from primitives import EDU_SCHEDULE_TODAY
-from simulation import run_monte_carlo, run_single_trial
+from donebyfifty.montecarlo import run_monte_carlo
 
 
 def build_reference_household(
@@ -97,7 +94,6 @@ def build_reference_household(
                 cost_basis=offset_bal,
                 asset_class="cash",
                 is_offset=True,
-                cgt_rate=0.0,
             ),
         ]
     else:
@@ -108,15 +104,12 @@ def build_reference_household(
                 cost_basis=200_000.0,
                 asset_class="cash",
                 is_offset=True,
-                cgt_rate=0.0,
             ),
             InvestmentAccount(
                 label="UK ETFs",
                 market_value=512_000.0,
                 cost_basis=201_000.0,
                 asset_class="equity",
-                tax_jurisdiction="uk",
-                cgt_rate=0.30,
             ),
         ]
 
@@ -126,8 +119,6 @@ def build_reference_household(
             market_value=63_000.0,
             cost_basis=63_000.0,
             asset_class="equity",
-            tax_jurisdiction="au",
-            cgt_rate=0.30,
         ),
     )
 
@@ -144,22 +135,18 @@ def build_reference_household(
 def run_deterministic() -> dict[str, float]:
     """Run a single deterministic trial and return key metrics."""
     h = build_reference_household(retire_age=50, sell_uk=True)
-    bridge_end_age = min(e.super_access_age for e in h.earners)
     inputs = SimulationInputs(
         simulation_start_age=37,
         cgt_on_drawdowns=True,
         sell_order=("AU ETFs",),
     )
 
-    n_years = bridge_end_age - inputs.simulation_start_age
-    eq = [0.07] * n_years  # EQ_MEAN
-
-    r = run_single_trial(h, inputs, eq_returns=eq)
+    r = run_single_trial(h, inputs)
 
     return {
-        "bridge": r.bridge,
-        "total_super": r.total_super,
-        "total_mortgage": r.total_mortgage,
+        "bridge": r.bridge[0],
+        "total_super": r.total_super[0],
+        "total_mortgage": r.total_mortgage[0],
     }
 
 
@@ -167,12 +154,13 @@ def run_monte_carlo_report(n_iterations: int = 5_000) -> dict[str, Any]:
     """Run a full Monte Carlo simulation and return summary stats."""
     h = build_reference_household(retire_age=50, sell_uk=True)
     inputs = SimulationInputs(
+        household=h,
         n_iterations=n_iterations,
         simulation_start_age=37,
         cgt_on_drawdowns=True,
     )
 
-    result = run_monte_carlo(h, inputs)
+    result = run_monte_carlo(inputs)
 
     return {
         "trials": result.trials,

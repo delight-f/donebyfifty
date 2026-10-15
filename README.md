@@ -1,151 +1,226 @@
 # DoneByFifty
 
-Monte Carlo simulator for the retirement *bridge* — the gap between leaving
-work and reaching preservation age, when superannuation becomes accessible.
+Monte Carlo simulator for the retirement *bridge*: the gap between leaving work
+and reaching super access age, when superannuation becomes accessible.
 
 It answers one question: can your non-super assets fund the bridge without
 running dry? It runs thousands of simulated futures and reports how often the
-plan fails, when it tends to break, and what drives the risk. Built for the
-Australian system (super, income tax, CGT). Interactive terminal UI (Rich).
-Fully offline — no network, no telemetry.
+plan fails, when it tends to break, and what drives the risk. The tax and super
+rules are Australian (income tax, Medicare levy, Division 293, CGT). The
+interface is a terminal UI built on Rich. It runs fully offline, with no network
+access and no telemetry.
 
 ## Features
 
 **Household**
 
-- Up to two earners, each with an independent salary trajectory, employment
-  type (employed / self-employed / both), part-time phases with custom daily
-  rates and date ranges, and a staggered retirement age
-- Independent super per earner: asset allocation, growth/defensive glide path,
-  optional non-concessional contributions
+- One or two earners, each with their own current age, employment type
+  (employed, self-employed, both, or not employed), salary path, part-time phases
+  with a daily rate and an age window, and an independent retirement age
+- Per-earner super: asset allocation, optional age-based glidepath, and optional
+  non-concessional contributions
 - Children with education cost schedules
-- Multiple mortgages (P&I or interest-only) with linked offset accounts and
-  selectable offset reserve modes
-- Investment accounts across asset classes and AU/UK tax jurisdictions
-- Jointly held accounts split taxable income by ownership share (per-owner CGT)
+- Multiple mortgages (principal and interest, or interest-only), each linked to
+  offset accounts with a selectable offset reserve mode
+- Investment accounts across equity, international equity, property, bonds, and
+  cash. Accounts can be jointly held, with income and capital gains split by
+  ownership share
+- Presets: single, couple (both working), couple (single income), family, and
+  custom
 
-**Australian tax and super**
+**Tax and super**
 
-- 5-bracket personal rates with annual indexation, Medicare Levy with the
-  low-income reduction, LITO, tiered Medicare Levy Surcharge, Division 293
-- Super: 12% SG on salary up to the max base, concessional cap with
-  auto-sacrifice, 15% contributions tax, configurable fund fee drag
-- CGT post-1-July-2027 reform: CPI-indexed cost basis so only real gains are
-  taxed, with a 30% per-owner minimum rate floor
-- CGT across the reform line: 30 Jun 2027 deemed-disposal split (50% discount
-  pre-reform, indexation + 30% floor post-reform), acquisition-dated cost-base
-  lots, gross-up for tax, per-owner bracket stacking
+- Resident income tax brackets, indexed each year, with LITO and the Medicare
+  levy (including the low-income reduction for singles and families)
+- Medicare levy surcharge, tiered by household income, with an option to turn it
+  off
+- Division 293 on concessional contributions, deducted from take-home pay
+  (worst case)
+- Super guarantee (12%) up to the SG maximum base, concessional cap with
+  auto-sacrifice, 15% contributions tax, and a configurable fund fee
+- CGT, including the 1 July 2027 reform: holdings re-based to market value at the
+  reform, a 50% discount on pre-reform gains, CPI-indexed cost base with a 30%
+  minimum rate on post-reform real gains, cost bases tracked by acquisition year
+  until the reform, and per-owner bracket stacking
+- Investment income tax: franked and unfranked dividends, with franking credits
+  refundable. Income is reinvested and taxed the following year
 
 **Stochastic model**
 
-- Correlated returns (equity, super, inflation, mortgage rate) from a single
-  Cholesky decomposition
-- Black–Karasinski mortgage rates: log-normal, mean-reverting, exact
-  Ornstein–Uhlenbeck discretisation
-- Real return inputs uplifted to nominal per year, so results are invariant to
-  the inflation assumption apart from statutory nominal thresholds
-- Per-subsystem seeded RNG, so enabling a stochastic feature does not change
-  the equity path for a fixed seed
+- Each asset class gets one shock per year, correlated with equity; equity and
+  inflation are drawn jointly through a Cholesky factor
+- Optional stochastic inflation, centred on your inflation input
+- Black-Karasinski mortgage rates: log-normal and mean-reverting, with the
+  long-run *mean* (not median) at the target rate. Optional repayment reset
+  when the rate changes
+- NumPy batch engine: all trials are simulated together as arrays. Each
+  subsystem (equity and inflation, asset classes, super, mortgages) has its own
+  seeded random stream, so enabling one feature does not change another's draws.
+  A seed is shown with each result for reproducibility
 
 **Analysis**
 
-- Success probability with a 0–100% chart and tiered risk messaging
-- Bridge asset distribution: mean, median, P5–P95, running minimum
-- Bootstrap standard errors (≥ 1,000 resamples) with colour-coded relative SE
+- Success probability, with tiered risk messaging
+- Bootstrap standard errors and 95% intervals (1,000 resamples)
 - Age-by-age bridge trajectory
-- Near-miss / failure-depth analysis (first age each trial crosses zero)
-- Sequencing risk: worst-first vs best-first return ordering
-- Drawdown source composition (offset vs non-offset funding, CGT paid, running
-  totals)
-- CGT breakdown
-- Scenario comparison, built dynamically from the household's own config
-- Earliest feasible retirement age search (scans every age; flags
-  non-monotonicity and distinguishes "no feasible age" from "infeasible plan")
+- Near-miss and failure timing: trials whose worst real bridge balance fell
+  below one year of retirement spending, and the age failures occurred
+- Sequencing risk: original order vs worst-first vs best-first return ordering
+- Drawdown source composition (offset vs non-offset funding, CGT, running totals)
+- CGT breakdown, with and without the 30% floor
+- Scenario comparison built from the household's own configuration, reported as
+  paired differences with 95% confidence intervals
+- Earliest feasible retirement age search
 - Mortgage amortisation schedule
 
 **Profiles**
 
-- Versioned JSON, one file per profile, with atomic writes and a v1 upgrade path
-- Save, load, tweak, list, delete; last-result summary stored alongside inputs
+- One JSON file per profile, written atomically, with schema versioning (v1 and
+  v2 profiles upgrade to v3 on load; corrupt files are listed but not loaded)
+- Save, load, tweak and re-run, and manage (list and delete). The last result is
+  stored with the inputs
 
-## Run on Linux Mint
+## Install and run
 
-Option A — prebuilt binary (no Python required). Download `montecarlo-cli` from
-the latest release, then:
-
-```bash
-chmod +x montecarlo-cli
-./montecarlo-cli
-```
-
-Option B — from source (Python 3.11+):
+Requires Python 3.12 or newer.
 
 ```bash
-git clone git@github.com:delight-f/donebyfifty.git
+git clone https://github.com/delight-f/donebyfifty.git
 cd donebyfifty
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
-python src/donebyfifty/main.py
+donebyfifty            # or: python -m donebyfifty
 ```
 
-The only runtime dependency is Rich. Modules use flat imports, so run
-`src/donebyfifty/main.py` directly (or use the built binary) — do not invoke
-`python -m donebyfifty`.
+Runtime dependencies are NumPy and Rich.
+
+Profiles are stored in `$XDG_DATA_HOME/donebyfifty/profiles` (default
+`~/.local/share/donebyfifty/profiles`). On Windows they are stored in
+`%APPDATA%\donebyfifty\profiles`.
+
+### Upgrading from 0.4.x
+
+- Python 3.12 or newer is required (NumPy 2.5).
+- Profiles moved out of the program directory. Copy your old
+  `src/donebyfifty/profiles/*.json` (or the `profiles/` folder next to the
+  executable) into the folder above; they upgrade to schema v3 on load.
+- Results change materially: CGT, interest-only mortgages, inflation timing,
+  return calibration and investment-income tax were corrected, so re-run saved
+  plans rather than comparing against old results.
 
 ## Usage
 
-Main menu: New simulation · Load profile · Manage profiles · Re-run last with
-seed · Exit.
+Main menu: New simulation, Load profile, Re-run last simulation with a seed,
+Manage profiles, Exit.
 
-Household presets: single · couple (both working) · couple (single income) ·
-family · custom.
+After each run, the results menu offers eight views:
 
-After each run a results menu exposes the eight drill-down views above. The
-expensive views (sequencing risk, scenario comparison, retirement search) are
-opt-in and cached. A seed is auto-generated per run for reproducibility.
+1. Age-by-age bridge trajectory
+2. Near misses and failure timing
+3. Sequencing risk (opt-in, runs two extra simulations)
+4. Drawdown source composition
+5. CGT breakdown
+6. Scenario comparison (opt-in; one extra simulation per scenario)
+7. Earliest feasible retirement age (opt-in; the search runs several simulations)
+8. Mortgage amortisation
 
-## Build
+Opt-in views ask for confirmation before running.
+
+## Build a standalone executable
 
 ```bash
-./build.sh      # Linux / macOS  -> dist/montecarlo-cli
-./build.ps1     # Windows        -> dist/montecarlo-cli.exe
+./build.sh      # Linux / macOS: builds dist/montecarlo-cli with PyInstaller
+./build.ps1     # Windows build script (untested in CI)
 ```
+
+No Python install is needed to run the built executable.
 
 ## Model notes
 
-- All return assumptions are real (inflation-adjusted). Defaults: AU equity
-  7.0% μ / 15% σ; international equity 6.5 / 16; bonds 3.0 / 6; cash 2.5 / 1;
-  property 5.0 / 12; super 7.0 / 12. Volatilities are placeholders.
-- Asset correlations live in `primitives.py` (equity/property 0.60,
-  equity/bonds 0.10, equity/international 0.70, equity/cash 0.0) and are
-  applied to log-returns, not raw returns.
-- Conservative defaults: Division 293 is deducted from take-home pay; a bridge
-  failure lets the simulation continue with unmet spending accumulating;
-  success requires assets to stay above zero at every timestep; all values are
-  reported in today's dollars.
-- Seeded runs are reproducible; golden-value tests pin the engine against a
-  hand calculation.
+These are the modelling decisions the results depend on.
+
+- **Time.** Simulation year `y` is the Australian financial year starting 1 July
+  of the start year plus `y`. The start year defaults to the current financial
+  year.
+- **Prices.** Year-`y` expenses and flows are priced at the cumulative price
+  index. Reported real figures use that index, so they are in today's dollars.
+- **Returns.** All return inputs are real and geometric (compound median
+  returns), with volatilities on the log-return scale.
+
+  | Asset class | Real geometric return | Volatility |
+  | --- | --- | --- |
+  | Australian equity | 6.5% | 15% |
+  | International equity | 6.0% | 16% |
+  | Property | 5.0% | 12% |
+  | Bonds | 3.0% | 6% |
+  | Cash | 2.5% | 1% |
+
+  Super returns blend Australian equity and bonds by each earner's growth
+  allocation (optionally gliding to a target). A per-earner override uses its
+  own mean with 12% volatility by default. The volatilities are unsourced
+  placeholders. Correlations with equity are applied to log-returns: super
+  override 0.80, property 0.60, international equity 0.70, bonds 0.10, cash 0.0,
+  inflation −0.15.
+- **Per-earner ages.** Each earner's retirement, part-time window and super
+  access use that earner's own age. Ages in reports follow Earner 1. The horizon
+  ends when the first earner reaches super access age.
+- **Investment income.** Australian equity pays a 4.0% yield, 75% franked.
+  International equity pays 2.0% and property 3.5%, both unfranked. Bonds and
+  cash earn their whole positive nominal return as income. Investment income tax
+  for year `y` is paid in year `y+1`.
+- **Mortgage rates.** Black-Karasinski with a long-run mean of 6.5%, mean-reversion
+  speed 0.20, and yearly volatility 0.18 (moderate) or 0.25 (stress). Rate shocks
+  are correlated with equity at 0.20 by default.
+- **Cash-flow timing.** Each year runs in order: half a year of growth, income
+  and expenses, mortgage interest, offset overflow, then the second half-year of
+  growth.
+- **Success.** A year fails if spending goes unmet in that year, or if the
+  year-end net bridge (bridge assets less cumulative unmet spending) is zero or
+  below. A trial succeeds if no year fails.
+- **Expenses.** The spending target blends linearly from the base figure to the
+  retirement figure, weighted by the fraction of employed earners who have
+  retired.
+- **Retirement search.** The search scans down from the entered age and reports
+  the earliest age from which every evaluated age passes the threshold. The
+  per-earner mode requires the target earner to be employed.
+- **Horizon.** The simulation covers the bridge only, up to the earliest super
+  access age. It does not model post-bridge drawdown, the Age Pension, or
+  minimum pension rules.
+
+## Known limitations
+
+- Division 293 is taken from take-home pay as a worst case. Super guarantee
+  contributions from part-time work are not counted towards the Division 293
+  test.
+- When the start year is after 2027, the whole opening unrealised gain is
+  treated as accrued before the CGT reform.
+- Mortgage repayments stay fixed when rates move unless the repayment reset
+  option is on.
+- Historical means are not forecasts. Test the plan against different return and
+  expense assumptions.
+- Tax rules are as legislated at the time of writing. The CGT reform is modelled
+  as legislated, with no allowance for further policy changes.
+
+This is a planning tool, not a substitute for advice from a licensed adviser.
 
 ## Development
 
 ```bash
 pip install -e ".[dev]"
-mypy . --strict && ruff check . && black --check . && pytest tests/ -q
+.venv/bin/mypy src --strict && .venv/bin/ruff check . && .venv/bin/black --check . && .venv/bin/pytest tests -q
 ```
 
-The suite (~200 tests) covers golden values, financial primitives, property
-behaviour, engine integration, and regression invariants.
+Coverage: `pytest tests -q --cov --cov-report=term-missing`. The coverage gate
+(`fail_under`) is set in `pyproject.toml`.
 
-CI runs all four gates on every push and pull request, on Python 3.11 and 3.12
-(`.github/workflows/ci.yml`).
+The test suite covers golden values, financial primitives, tax and CGT
+calculations, engine integration, profile storage, the user interface, and
+regression invariants.
 
-## Caveats
-
-- Historical means are not forecasts. Sensitivity-test the plan.
-- Tax rules are current as at July 2026; the CGT reform is modelled as
-  legislated for 1 July 2027 with no allowance for further policy changes.
-- Planning tool only — not a substitute for advice from a licensed adviser.
+CI (`.github/workflows/ci.yml`) runs on pushes to `main` and on pull requests. It
+runs lint (ruff and black), types (mypy strict), tests with coverage on Ubuntu
+(Python 3.12 and 3.13) and Windows (Python 3.12), and a Linux executable build.
 
 ## License
 

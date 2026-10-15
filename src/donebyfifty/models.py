@@ -1,19 +1,35 @@
 """Data models for the Monte Carlo CLI tool.
 
-Pure dataclasses with no logic, I/O, or UI dependencies. All models are
-frozen (immutable) to prevent accidental mutation.
+Pure dataclasses with no I/O or UI dependencies. Scenario inputs validate
+themselves in ``__post_init__``. ``SimulationResults`` is immutable (tuples
+and read-only mappings). ``Profile`` and ``ResultsSession`` are mutable
+session records.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Iterator, NewType, TypeVar, overload
+import math
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field, fields, replace
+from datetime import date
+from types import MappingProxyType
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Iterator,
+    Literal,
+    NewType,
+    TypeVar,
+    get_args,
+    overload,
+)
+
+from .config import DEFAULT_EDU_SCHEDULE, DEFAULT_SIM_START_AGE
 
 _T = TypeVar("_T")
 
 if TYPE_CHECKING:
-    from simulation import ScenarioComparisonResult
+    from .analysis import ScenarioComparisonResult
 
 # =============================================================================
 # UNIT TYPES — documentation-only NewTypes for clarity
@@ -24,6 +40,41 @@ Percent = NewType("Percent", float)
 
 Rate = NewType("Rate", float)
 """A rate stored as a decimal (e.g. 0.005 means 0.5%)."""
+
+EmploymentType = Literal["employed", "self_employed", "both", "not_employed"]
+"""Income/super modelling mode for an ``Earner``."""
+PtRateMode = Literal["daily_rate", "salary_pct"]
+"""How a part-time income rate is entered."""
+AssetClass = Literal["equity", "intl_equity", "bonds", "cash", "property"]
+"""Asset class key into ``returns.ASSET_CLASS_PARAMS``."""
+OffsetReserveMode = Literal["fixed", "stall_prevention", "interest_cancelling"]
+"""How the offset reserve is determined for a mortgage offset account."""
+SellStrategy = Literal["waterfall"]
+"""Order in which investment accounts are sold to fund drawdowns."""
+
+EMPLOYMENT_TYPES: tuple[str, ...] = get_args(EmploymentType)
+PT_RATE_MODES: tuple[str, ...] = get_args(PtRateMode)
+ASSET_CLASSES: tuple[str, ...] = get_args(AssetClass)
+OFFSET_RESERVE_MODES: tuple[str, ...] = get_args(OffsetReserveMode)
+SELL_STRATEGIES: tuple[str, ...] = get_args(SellStrategy)
+
+
+def _check_choice(name: str, value: object, choices: tuple[str, ...]) -> None:
+    """Raise ``ValueError`` unless ``value`` is one of ``choices``."""
+    if value not in choices:
+        raise ValueError(f"{name} must be one of {choices} (got {value!r})")
+
+
+def _check_finite_nonneg(name: str, value: float) -> None:
+    """Raise ``ValueError`` unless ``value`` is a finite number >= 0."""
+    if not math.isfinite(value) or value < 0:
+        raise ValueError(f"{name} must be a finite number >= 0 (got {value})")
+
+
+def _check_age(name: str, value: int | None) -> None:
+    """Raise ``ValueError`` unless ``value`` is None or an age in 0..120."""
+    if value is not None and not 0 <= value <= 120:
+        raise ValueError(f"{name} must be an age in 0..120 (got {value})")
 
 
 # =============================================================================
@@ -199,16 +250,18 @@ class Earner:
     Set to 0 for salary that just tracks inflation (flat in real terms).
     """
     retirement_age: int = 50
+    start_age: int | None = None
+    """Age at simulation start for this earner (D15). ``None`` means use
+    ``SimulationInputs.simulation_start_age``. Validated 0..120."""
     birth_year: int | None = None
-    """Birth year for preservation-age lookup.
-
-    If set, ``super_access_age`` is auto-computed from Australian
-    preservation-age rules (55–60 depending on birth year). When
-    ``None`` (default), ``super_access_age`` must be set manually.
-    """
-    super_access_age: int = 60
+    """Birth year for preservation-age lookup. Used by
+    ``effective_super_access_age`` when ``super_access_age`` is None."""
+    super_access_age: int | None = None
+    """Age at which super is accessible. ``None`` means use
+    ``preservation_age(birth_year)``. At least one of ``super_access_age``
+    and ``birth_year`` must be set. Read via ``effective_super_access_age``."""
     sg_rate: float = 0.12
-    employment_type: str = "employed"
+    employment_type: EmploymentType = "employed"
     """Employment type for income/super modelling.
 
     ``"employed"`` (default): salary income, SG applied at ``sg_rate``,
@@ -250,15 +303,15 @@ class Earner:
     Default ``False`` (no SG on self-employed income).
     """
     pt_days_per_week: float = 0.0
-    pt_start_age: int = -1
-    """Age at which part-time income begins. -1 (default) means use ``retirement_age``."""
-    pt_end_age: int = 0
-    """Age at which part-time income ends. 0 (default) means use
-    ``super_access_age`` (bridge horizon).
-    """
+    pt_start_age: int | None = None
+    """Age at which part-time income begins. ``None`` (default) means use
+    ``retirement_age``. Read via ``effective_pt_start_age``."""
+    pt_end_age: int | None = None
+    """Age at which part-time income ends. ``None`` (default) means use the
+    effective super access age (bridge horizon). Read via ``effective_pt_end_age``."""
     pt_daily_rate: float = 3_000.0
     pt_weeks_per_year: float = 48.0
-    pt_rate_mode: str = "daily_rate"
+    pt_rate_mode: PtRateMode = "daily_rate"
     """How the part-time income rate is entered.
 
     ``"daily_rate"`` (default): user provides an explicit daily rate
@@ -328,7 +381,7 @@ class Earner:
     Only meaningful when ``super_glide_end_year`` is set.
     Default 30% (conservative, suitable for someone approaching preservation age).
     """
-    super_asset_class: str = "equity"
+    super_asset_class: AssetClass = "equity"
     """Asset class for this earner's superannuation returns.
     Used when ``super_mean_override`` is not set AND growth blending is
     not applicable (kept for backward compatibility).
@@ -338,9 +391,9 @@ class Earner:
     asset class lookup from ``super_asset_class``.
 
     Note: The defaults these overrides fall back to (``EQ_MEAN``, ``EQ_STD``,
-    etc. in ``primitives.py``) have mixed provenance. Equity mean is sourced
+    etc. in ``returns.py``) have mixed provenance. Equity mean is sourced
     (Credit Suisse / UBS Yearbook); all standard deviations and most other
-    means are unsourced placeholders. See ``primitives.py`` module docstring
+    means are unsourced placeholders. See ``returns.py`` module docstring
     and per-constant comments for full provenance details.
     """
     super_std_override: float | None = None
@@ -352,25 +405,39 @@ class Earner:
     """
 
     def __post_init__(self) -> None:
-        """Auto-compute super_access_age from birth_year; resolve pt_start_age sentinel."""
+        """Validate fields. Sentinels are never overwritten here (D16)."""
+        if self.super_access_age is None and self.birth_year is None:
+            raise ValueError(f"Earner {self.label!r}: set super_access_age or birth_year")
         if self.birth_year is not None:
-            computed = preservation_age(self.birth_year)
-            if self.super_access_age == 60 and computed != 60:
-                # User didn't override super_access_age — use computed value
-                object.__setattr__(self, "super_access_age", computed)
-        # Resolve pt_start_age sentinel: -1 means "follow retirement_age"
-        if self.pt_start_age == -1:
-            if self.retirement_age >= 999:
-                # Non-employed or no retirement set — use old default of 60
-                object.__setattr__(self, "pt_start_age", 60)
-            else:
-                object.__setattr__(self, "pt_start_age", self.retirement_age)
-        # Resolve pt_end_age sentinel: 0 means "follow super_access_age"
-        if self.pt_end_age == 0:
-            object.__setattr__(self, "pt_end_age", self.super_access_age)
+            preservation_age(self.birth_year)  # raises ValueError outside 1900–2100
+        _check_choice("employment_type", self.employment_type, EMPLOYMENT_TYPES)
+        _check_choice("pt_rate_mode", self.pt_rate_mode, PT_RATE_MODES)
+        _check_choice("super_asset_class", self.super_asset_class, ASSET_CLASSES)
+        for name in ("start_age", "super_access_age", "pt_start_age", "pt_end_age"):
+            _check_age(name, getattr(self, name))
+        if self.retirement_age < 0:
+            raise ValueError(f"retirement_age must be >= 0 (got {self.retirement_age})")
+        for name in (
+            "salary",
+            "super_balance",
+            "self_employed_income",
+            "pt_daily_rate",
+            "pt_salary_pct",
+            "non_concessional_contributions_p_a",
+        ):
+            _check_finite_nonneg(name, getattr(self, name))
+        if self.personal_super_contributions_total_p_a is not None:
+            _check_finite_nonneg(
+                "personal_super_contributions_total_p_a",
+                self.personal_super_contributions_total_p_a,
+            )
+        if not 0.0 <= self.pt_days_per_week <= 7.0:
+            raise ValueError(f"pt_days_per_week must be 0–7 (got {self.pt_days_per_week})")
+        if not 0.0 <= self.pt_weeks_per_year <= 52.0:
+            raise ValueError(f"pt_weeks_per_year must be 0–52 (got {self.pt_weeks_per_year})")
         # Unit validation: _pct fields are 0–100, _rate fields are ≥ -1.0.
         # Bounds are chosen to accept every value the UI can produce; see
-        # ui.py prompt ranges (salary_growth -5..15%, sg 0..20%, etc.).
+        # ui_wizard.py prompt ranges (salary_growth -5..15%, sg 0..20%, etc.).
         if not 0.0 <= self.super_growth_pct <= 100.0:
             raise ValueError(f"super_growth_pct must be 0–100 (got {self.super_growth_pct})")
         if not 0.0 <= self.super_glide_target_pct <= 100.0:
@@ -385,6 +452,29 @@ class Earner:
             )
         if not 0.0 <= self.sg_rate <= 1.0:
             raise ValueError(f"sg_rate must be 0–1 (got {self.sg_rate})")
+
+    @property
+    def effective_pt_start_age(self) -> int:
+        """Part-time start age: ``pt_start_age``, else ``retirement_age``."""
+        return self.retirement_age if self.pt_start_age is None else self.pt_start_age
+
+    @property
+    def effective_super_access_age(self) -> int:
+        """Super access age: ``super_access_age``, else preservation age from ``birth_year``."""
+        if self.super_access_age is not None:
+            return self.super_access_age
+        if self.birth_year is None:  # unreachable: __post_init__ enforces one of the two
+            raise ValueError(f"Earner {self.label!r}: set super_access_age or birth_year")
+        return preservation_age(self.birth_year)
+
+    @property
+    def effective_pt_end_age(self) -> int:
+        """Part-time end age: ``pt_end_age``, else the effective super access age."""
+        return self.effective_super_access_age if self.pt_end_age is None else self.pt_end_age
+
+    def resolved_start_age(self, reference_start_age: int) -> int:
+        """Age at simulation start: ``start_age``, else ``reference_start_age`` (D15)."""
+        return reference_start_age if self.start_age is None else self.start_age
 
 
 @dataclass(frozen=True)
@@ -415,8 +505,12 @@ class MortgageAccount:
     """Outstanding balance at simulation start, not original loan amount."""
     interest_rate: float = 0.0605
     monthly_payment: float = 0.0
+    reprice_payment: bool = False
+    """If True, the rate changes, and ``loan_term_end_age`` is set, the P&I
+    payment is recomputed for the remaining term each year. Default False
+    keeps ``monthly_payment`` fixed."""
     offset_accounts: tuple[str, ...] = ()
-    offset_reserve_mode: str = "fixed"
+    offset_reserve_mode: OffsetReserveMode = "fixed"
     """How the offset reserve floor is determined each period.
 
     ``"fixed"`` (default): the floor is the static ``offset_reserve_floor``
@@ -495,31 +589,48 @@ class MortgageAccount:
     distinguishes this from the default).
     """
 
+    def __post_init__(self) -> None:
+        """Validate amounts, rates, and stochastic-rate parameters."""
+        _check_finite_nonneg("principal", self.principal)
+        _check_finite_nonneg("monthly_payment", self.monthly_payment)
+        _check_finite_nonneg("offset_reserve_floor", self.offset_reserve_floor)
+        _check_choice("offset_reserve_mode", self.offset_reserve_mode, OFFSET_RESERVE_MODES)
+        _check_age("loan_term_end_age", self.loan_term_end_age)
+        if not 0.0 <= self.interest_rate <= 1.0:
+            raise ValueError(f"interest_rate must be 0–1 (got {self.interest_rate})")
+        if self.interest_rate_vol is not None and not self.interest_rate_vol >= 0.0:
+            raise ValueError(f"interest_rate_vol must be >= 0 (got {self.interest_rate_vol})")
+        if self.interest_rate_kappa is not None and not self.interest_rate_kappa > 0.0:
+            raise ValueError(f"interest_rate_kappa must be > 0 (got {self.interest_rate_kappa})")
+        if self.interest_rate_theta is not None and not self.interest_rate_theta > 0.0:
+            raise ValueError(f"interest_rate_theta must be > 0 (got {self.interest_rate_theta})")
+        if self.interest_rate_corr is not None and not -1.0 <= self.interest_rate_corr <= 1.0:
+            raise ValueError(
+                f"interest_rate_corr must be in [-1, 1] (got {self.interest_rate_corr})"
+            )
+
 
 @dataclass(frozen=True)
 class InvestmentAccount:
     """An investment account (equity, cash, property, etc.) outside super.
 
     ``asset_class`` describes the type of asset for return modelling.
-    ``tax_jurisdiction`` determines CGT treatment on drawdowns.
     ``is_offset`` marks this as a mortgage offset account (treated as cash).
-    ``interest_rate`` allows users to specify a custom fixed return rate (e.g.
-    0.01 for 1% cash accounts). When 0.0 (default), the asset class return
-    model is used instead (e.g. ~7% for equity, ~3% for bonds).
+    ``interest_rate`` is an optional fixed-return override (e.g. 0.01 for 1%
+    cash accounts). ``None`` (default) uses the asset class return model
+    instead (e.g. ~7% for equity, ~3% for bonds); 0.0 is a real 0% return.
     """
 
     label: str = "Account 1"
     market_value: float = 0.0
     cost_basis: float = 0.0
-    asset_class: str = "equity"
-    tax_jurisdiction: str = "au"
-    cgt_rate: float = 0.30
+    asset_class: AssetClass = "equity"
     is_offset: bool = False
     fee_rate: float = 0.0
-    interest_rate: float = 0.0
+    interest_rate: float | None = None
     """Expected annual return override for this account (decimal).
 
-    0.0 (default) means use the asset class's default mean and volatility.
+    ``None`` (default) means use the asset class's default mean and volatility.
     When set, the return is lognormal with this user-specified mean and the
     asset class's standard deviation and equity correlation — NOT a fixed
     deterministic rate.  For example, an equity account with
@@ -535,7 +646,7 @@ class InvestmentAccount:
 
     Ownership indices are stable across a simulation trial — the earner tuple
     order is invariant, matching the indexing of ``super_balances[]``,
-    ``earner_taxable_incomes[]``, etc.
+    the per-owner tax positions, etc.
     """
 
     def __post_init__(self) -> None:
@@ -543,8 +654,11 @@ class InvestmentAccount:
         # Coerce a plain dict to Ownership (e.g. from deserialisation).
         if not isinstance(self.ownership, Ownership):
             object.__setattr__(self, "ownership", Ownership(self.ownership))
+        _check_choice("asset_class", self.asset_class, ASSET_CLASSES)
+        _check_finite_nonneg("market_value", self.market_value)
+        _check_finite_nonneg("cost_basis", self.cost_basis)
         total = sum(self.ownership.values())
-        if abs(total - 1.0) > 0.001:
+        if not math.isfinite(total) or abs(total - 1.0) > 0.001:
             raise ValueError(
                 f"Account '{self.label}' ownership shares sum to {total:.4f}, "
                 f"expected 1.0.  Each account's ownership shares must sum to "
@@ -555,16 +669,12 @@ class InvestmentAccount:
                 raise ValueError(f"Account '{self.label}' has negative earner index {ei}.")
             if share < 0:
                 raise ValueError(
-                    f"Account '{self.label}' has negative share {share} for " f"earner {ei}."
+                    f"Account '{self.label}' has negative share {share} for earner {ei}."
                 )
-        # Unit validation: _rate fields are 0–1.0.  Bounds accept every value
-        # the UI can produce (interest_rate 0–20%, cgt_rate 0.30, fee_rate 0).
-        if not 0.0 <= self.cgt_rate <= 1.0:
-            raise ValueError(f"cgt_rate must be 0–1 (got {self.cgt_rate})")
         if not 0.0 <= self.fee_rate <= 1.0:
             raise ValueError(f"fee_rate must be 0–1 (got {self.fee_rate})")
-        if not 0.0 <= self.interest_rate <= 1.0:
-            raise ValueError(f"interest_rate must be 0–1 (got {self.interest_rate})")
+        if self.interest_rate is not None and not 0.0 <= self.interest_rate <= 1.0:
+            raise ValueError(f"interest_rate must be 0–1 or None (got {self.interest_rate})")
 
 
 @dataclass(frozen=True)
@@ -575,7 +685,7 @@ class Household:
     and no investment accounts.
     """
 
-    earners: tuple[Earner, ...] = (Earner(),)
+    earners: tuple[Earner, ...] = (Earner(super_access_age=60),)
     children: tuple[Child, ...] = ()
     mortgages: tuple[MortgageAccount, ...] = ()
     investment_accounts: tuple[InvestmentAccount, ...] = ()
@@ -602,10 +712,52 @@ class Household:
         """Sum of all earners' super balances."""
         return sum(e.super_balance for e in self.earners)
 
+    def __post_init__(self) -> None:
+        """Cross-field validation: earners, unique labels, ownership and offset links."""
+        if not self.earners:
+            raise ValueError("Household needs at least one earner")
+        _check_finite_nonneg("base_living_expenses", self.base_living_expenses)
+        _check_finite_nonneg("retirement_target", self.retirement_target)
+        for kind, items in (
+            ("earner", self.earners),
+            ("child", self.children),
+            ("mortgage", self.mortgages),
+            ("investment account", self.investment_accounts),
+        ):
+            labels = [item.label for item in items]
+            if len(set(labels)) != len(labels):
+                raise ValueError(f"duplicate {kind} labels: {labels}")
+        for acct in self.investment_accounts:
+            for ei, _share in acct.ownership.items():
+                if ei >= len(self.earners):
+                    raise ValueError(
+                        f"Account '{acct.label}' is owned by earner index {ei}, "
+                        f"but the household has {len(self.earners)} earner(s)"
+                    )
+        offset_accounts = {a.label: a for a in self.investment_accounts}
+        for mort in self.mortgages:
+            for label in mort.offset_accounts:
+                offset = offset_accounts.get(label)
+                if offset is None:
+                    raise ValueError(
+                        f"Mortgage '{mort.label}' links to unknown offset account '{label}'"
+                    )
+                if not offset.is_offset:
+                    raise ValueError(
+                        f"Mortgage '{mort.label}' links to '{label}', "
+                        "which is not an offset account"
+                    )
+
 
 # =============================================================================
 # SIMULATION INPUTS / RESULTS
 # =============================================================================
+
+
+def _current_fy_start_year() -> int:
+    """Start year of the current Australian financial year (1 July start)."""
+    today = date.today()
+    return today.year if today.month >= 7 else today.year - 1
 
 
 @dataclass(frozen=True)
@@ -615,15 +767,15 @@ class SimulationInputs:
     household: Household = field(default_factory=Household)
     n_iterations: int = 5_000
     inflation: float = 0.025
-    simulation_start_age: int = 37
-    simulation_start_year: int = 2026
+    simulation_start_age: int = DEFAULT_SIM_START_AGE
+    simulation_start_year: int = field(default_factory=_current_fy_start_year)
     """Calendar year in which simulation year 0 falls.
 
     Anchors the model to the real calendar so date-based tax rules (the
     30 June 2027 CGT reform line) can be located in simulation time.
     """
     cgt_on_drawdowns: bool = True
-    sell_strategy: str = "waterfall"
+    sell_strategy: SellStrategy = "waterfall"
     sell_order: tuple[str, ...] = ()
     conc_cap_growth_rate: float = 0.03
     """Annual growth rate for the concessional contributions cap."""
@@ -642,7 +794,7 @@ class SimulationInputs:
     mls_tiered: bool = True
     """Use progressive MLS tiers (1.0% / 1.25% / 1.5%) based on income.
 
-    When True (default), the MLS rate is computed from ``mls_rate_for_income()``
+    When True (default), the MLS rate is computed from ``tax.mls_rate()``
     using singles or couple tiers depending on household composition.
     When False, the flat ``mls_rate`` is used for all incomes above threshold.
     """
@@ -661,11 +813,6 @@ class SimulationInputs:
     """Division 293 income threshold for additional tax on concessional contributions."""
     div293_rate: float = 0.15
     """Division 293 additional tax rate on concessional contributions above threshold."""
-    div293_growth_rate: float = 0.025
-    """DEPRECATED — Division 293 threshold is statutory at $250,000 since
-    1 July 2017 and is not indexed. This field is retained for backward
-    compatibility with existing profiles but is no longer used in the engine.
-    """
     surplus_investment_pct: float = 0.0
     """Percentage of annual surplus to allocate to non-offset investment accounts
     (the remainder goes to offset accounts or cash).
@@ -699,14 +846,44 @@ class SimulationInputs:
             raise ValueError(f"bracket_growth_rate must be 0–1 (got {self.bracket_growth_rate})")
         if not 0.0 <= self.div293_rate <= 1.0:
             raise ValueError(f"div293_rate must be 0–1 (got {self.div293_rate})")
-        if not 0.0 <= self.div293_growth_rate <= 1.0:
-            raise ValueError(f"div293_growth_rate must be 0–1 (got {self.div293_growth_rate})")
         if not 0.0 <= self.conc_cap_growth_rate <= 1.0:
             raise ValueError(f"conc_cap_growth_rate must be 0–1 (got {self.conc_cap_growth_rate})")
         if not 0.0 <= self.sg_max_base_growth_rate <= 1.0:
             raise ValueError(
                 f"sg_max_base_growth_rate must be 0–1 (got {self.sg_max_base_growth_rate})"
             )
+
+        _check_age("simulation_start_age", self.simulation_start_age)
+        if self.n_iterations < 2:
+            raise ValueError(f"n_iterations must be >= 2 (got {self.n_iterations})")
+        if not 0.0 < self.success_threshold <= 1.0:
+            raise ValueError(f"success_threshold must be in (0, 1] (got {self.success_threshold})")
+        _check_choice("sell_strategy", self.sell_strategy, SELL_STRATEGIES)
+
+
+def validate_horizon(household: Household, inputs: SimulationInputs) -> None:
+    """Raise ``ValueError`` unless every earner has at least one simulated year before super access.
+
+    Simulation year ``y`` falls at ``resolved_start_age + y`` for each earner (D15), so the
+    horizon is ``min over earners of (effective_super_access_age - resolved_start_age)``;
+    it must be positive.
+    """
+    for earner in household.earners:
+        start = earner.resolved_start_age(inputs.simulation_start_age)
+        if earner.effective_super_access_age <= start:
+            raise ValueError(
+                f"Earner {earner.label!r}: super access age "
+                f"{earner.effective_super_access_age} must be above start age {start}"
+            )
+
+
+def _freeze_value(value: object) -> object:
+    """Recursively turn lists into tuples and dicts into read-only mappings (L5)."""
+    if isinstance(value, Mapping):
+        return MappingProxyType({k: _freeze_value(v) for k, v in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_value(v) for v in value)
+    return value
 
 
 @dataclass(frozen=True)
@@ -735,13 +912,13 @@ class SimulationResults:
     If equal to ``bridge_floor``, the worst path declined monotonically;
     if higher, the portfolio recovered after the floor."""
     horizon_age: int = 60
-    per_earner_super_p50: dict[str, float] = field(default_factory=dict)
-    remaining_mortgage_p50: dict[str, float] = field(default_factory=dict)
+    per_earner_super_p50: Mapping[str, float] = field(default_factory=dict)
+    remaining_mortgage_p50: Mapping[str, float] = field(default_factory=dict)
     mortgage_term_clearance_rate: float = 1.0
     """Proportion of trials where ALL mortgages with a term end cleared by that term."""
-    per_mortgage_term_cleared_pct: dict[str, float] = field(default_factory=dict)
+    per_mortgage_term_cleared_pct: Mapping[str, float] = field(default_factory=dict)
     """Per-mortgage term-clearance rate across all checkable trials."""
-    per_mortgage_not_checkable: dict[str, int] = field(default_factory=dict)
+    per_mortgage_not_checkable: Mapping[str, int] = field(default_factory=dict)
     """Mortgages whose term end is beyond the simulation horizon.
     Maps label -> number of trials (should equal total trials). Not an
     error, but means the term-clearance question can't be answered yet.
@@ -754,61 +931,92 @@ class SimulationResults:
     bridge_mean_se: float | None = None
 
     # Work Item 1 — Age-by-age bridge trajectory (percentiles per year)
-    bridge_by_age_ages: list[int] = field(default_factory=list)
+    bridge_by_age_ages: Sequence[int] = field(default_factory=list)
     """Ages corresponding to the bridge trajectory rows. Populated when
     per-year trajectory capture is enabled."""
-    bridge_by_age_p5: list[float] = field(default_factory=list)
-    bridge_by_age_p10: list[float] = field(default_factory=list)
-    bridge_by_age_p25: list[float] = field(default_factory=list)
-    bridge_by_age_p50: list[float] = field(default_factory=list)
-    bridge_by_age_p75: list[float] = field(default_factory=list)
-    bridge_by_age_p90: list[float] = field(default_factory=list)
-    bridge_by_age_p95: list[float] = field(default_factory=list)
+    bridge_by_age_p5: Sequence[float] = field(default_factory=list)
+    bridge_by_age_p10: Sequence[float] = field(default_factory=list)
+    bridge_by_age_p25: Sequence[float] = field(default_factory=list)
+    bridge_by_age_p50: Sequence[float] = field(default_factory=list)
+    bridge_by_age_p75: Sequence[float] = field(default_factory=list)
+    bridge_by_age_p90: Sequence[float] = field(default_factory=list)
+    bridge_by_age_p95: Sequence[float] = field(default_factory=list)
 
     # Work Item 2 — Near-miss / failure depth analysis
     near_miss_rate: float = 1.0
-    """Proportion of trials that never crossed the near-miss threshold.
-    Only populated when capture is enabled (same as bridge_by_age).
-    """
+    """Fraction of trials that failed OR whose real floor fell at or below
+    ``near_miss_threshold``. Failures are included. Populated by the Monte Carlo run."""
+    near_miss_only_rate: float = 0.0
+    """Fraction of trials with ``0 < floor <= near_miss_threshold``, whether or not
+    they failed. Not cumulative with failures."""
     near_miss_threshold: float = 0.0
-    """Dollar threshold below which a trial is considered a near-miss.
-    0.0 (default) = same as failure.
-    """
-    failure_age_distribution: dict[int, int] = field(default_factory=dict)
+    """Real floor (today's dollars) at or below which a trial counts as a near miss.
+    The Monte Carlo default is one year of ``household.retirement_target``."""
+    failure_age_distribution: Mapping[int, int] = field(default_factory=dict)
     """Ages at which failures occurred, one entry per failing trial.
     Key = age, value = count of failing trials at that age.
     Empty dict when no failures.
     """
+    warnings: tuple[str, ...] = ()
+    """Structured run warnings (for example, low Monte Carlo variance). Empty when none."""
 
     # Work Items 4, 5 — Per-year drawdown composition
-    offset_drawn_p50: list[float] = field(default_factory=list)
+    offset_drawn_p50: Sequence[float] = field(default_factory=list)
     """Median offset draws by year (per-year breakdown, Work Item 4)."""
-    non_offset_drawn_p50: list[float] = field(default_factory=list)
+    non_offset_drawn_p50: Sequence[float] = field(default_factory=list)
     """Median non-offset draws by year (Work Item 4)."""
-    offset_drawn_p5: list[float] = field(default_factory=list)
-    offset_drawn_p95: list[float] = field(default_factory=list)
-    cgt_paid_p50: list[float] = field(default_factory=list)
+    offset_drawn_p5: Sequence[float] = field(default_factory=list)
+    offset_drawn_p95: Sequence[float] = field(default_factory=list)
+    cgt_paid_p50: Sequence[float] = field(default_factory=list)
     """Median CGT paid by year (with 30% floor, Work Item 5)."""
-    cgt_paid_p5: list[float] = field(default_factory=list)
-    cgt_paid_p95: list[float] = field(default_factory=list)
-    cgt_without_floor_p50: list[float] = field(default_factory=list)
+    cgt_paid_p5: Sequence[float] = field(default_factory=list)
+    cgt_paid_p95: Sequence[float] = field(default_factory=list)
+    cgt_without_floor_p50: Sequence[float] = field(default_factory=list)
     """Median CGT without 30% floor by year (counterfactual, Work Item 5)."""
+    # Investment-income tax (D14), today's dollars: median by year, per-trial totals.
+    income_tax_p50: Sequence[float] = field(default_factory=list)
+    """Median investment-income tax paid by year (today's dollars)."""
+    income_tax_total_p5: float = 0.0
+    income_tax_total_p50: float = 0.0
+    income_tax_total_p95: float = 0.0
+
+    # Per-trial drawdown totals (today's dollars). True quantiles of the per-trial
+    # totals, not sums of per-year medians (M4a).
+    offset_drawn_total_p5: float = 0.0
+    offset_drawn_total_p50: float = 0.0
+    offset_drawn_total_p95: float = 0.0
+    non_offset_drawn_total_p5: float = 0.0
+    non_offset_drawn_total_p50: float = 0.0
+    non_offset_drawn_total_p95: float = 0.0
+    cgt_paid_total_p5: float = 0.0
+    cgt_paid_total_p50: float = 0.0
+    cgt_paid_total_p95: float = 0.0
+    cgt_without_floor_total_p5: float = 0.0
+    cgt_without_floor_total_p50: float = 0.0
+    cgt_without_floor_total_p95: float = 0.0
+    cgt_floor_extra_total_p5: float = 0.0
+    """Per-trial total CGT attributable to the 30% minimum-rate floor
+    (CGT paid minus CGT without the floor), P5."""
+    cgt_floor_extra_total_p50: float = 0.0
+    """Median per-trial extra CGT from the 30% minimum-rate floor. A true quantile
+    of the per-trial difference, not a difference of two sums of per-year medians."""
+    cgt_floor_extra_total_p95: float = 0.0
 
     # Work Item 10 — Mortgage amortisation by age (P5/P50/P95 per mortgage)
-    mortgage_by_age_ages: list[int] = field(default_factory=list)
+    mortgage_by_age_ages: Sequence[int] = field(default_factory=list)
     """Ages for the mortgage amortisation rows."""
-    mortgage_by_age: dict[str, dict[str, list[float]]] = field(default_factory=dict)
+    mortgage_by_age: Mapping[str, Mapping[str, Sequence[float]]] = field(default_factory=dict)
     """Per-mortgage balances by age with P5/P50/P95 percentiles.
     Structure: {label: {"p50": [y0, y1, ...], "p5": [...], "p95": [...]}}
     Nominal dollars (debt doesn't inflate).
     """
-    offset_by_age: dict[str, dict[str, list[float]]] = field(default_factory=dict)
+    offset_by_age: Mapping[str, Mapping[str, Sequence[float]]] = field(default_factory=dict)
     """Per-offset-account balances by age with P5/P50/P95 percentiles.
     Same structure as mortgage_by_age. Nominal dollars.
     """
 
     # Work Item 10 — Mortgage rate trajectory (P5/P50/P95 per mortgage)
-    mortgage_rate_by_age: dict[str, dict[str, list[float]]] = field(default_factory=dict)
+    mortgage_rate_by_age: Mapping[str, Mapping[str, Sequence[float]]] = field(default_factory=dict)
     """Per-mortgage annual interest rate by age with P5/P50/P95 percentiles.
     Same dict structure as mortgage_by_age. Decimal rates (e.g. 0.065).
     Only populated when stochastic rates are enabled.
@@ -830,6 +1038,15 @@ class SimulationResults:
     As of the results enhancement (July 2026), all output uses real
     (today's) dollars. Old saved profiles may have "nominal" values.
     """
+
+    def __post_init__(self) -> None:
+        """Freeze containers so results cannot be mutated after the run (L5).
+
+        Lists become tuples and dicts become read-only mappings, copying
+        them so later changes to the caller's objects cannot leak in.
+        """
+        for f in fields(self):
+            object.__setattr__(self, f.name, _freeze_value(getattr(self, f.name)))
 
     def summary_dict(self) -> dict[str, Any]:
         """Return a flat dict suitable for JSON serialisation."""
@@ -864,6 +1081,8 @@ class SimulationResults:
             "value_basis": self.value_basis,
             "near_miss_rate": self.near_miss_rate,
             "near_miss_threshold": self.near_miss_threshold,
+            "near_miss_only_rate": self.near_miss_only_rate,
+            "warnings": list(self.warnings),
             "failure_age_distribution": dict(self.failure_age_distribution),
             # Trajectory (Work Items 1, 10)
             # Drawdown composition (Work Items 4, 5)
@@ -875,6 +1094,25 @@ class SimulationResults:
             "cgt_paid_p5": list(self.cgt_paid_p5),
             "cgt_paid_p95": list(self.cgt_paid_p95),
             "cgt_without_floor_p50": list(self.cgt_without_floor_p50),
+            "income_tax_p50": list(self.income_tax_p50),
+            "income_tax_total_p5": self.income_tax_total_p5,
+            "income_tax_total_p50": self.income_tax_total_p50,
+            "income_tax_total_p95": self.income_tax_total_p95,
+            "offset_drawn_total_p5": self.offset_drawn_total_p5,
+            "offset_drawn_total_p50": self.offset_drawn_total_p50,
+            "offset_drawn_total_p95": self.offset_drawn_total_p95,
+            "non_offset_drawn_total_p5": self.non_offset_drawn_total_p5,
+            "non_offset_drawn_total_p50": self.non_offset_drawn_total_p50,
+            "non_offset_drawn_total_p95": self.non_offset_drawn_total_p95,
+            "cgt_paid_total_p5": self.cgt_paid_total_p5,
+            "cgt_paid_total_p50": self.cgt_paid_total_p50,
+            "cgt_paid_total_p95": self.cgt_paid_total_p95,
+            "cgt_without_floor_total_p5": self.cgt_without_floor_total_p5,
+            "cgt_without_floor_total_p50": self.cgt_without_floor_total_p50,
+            "cgt_without_floor_total_p95": self.cgt_without_floor_total_p95,
+            "cgt_floor_extra_total_p5": self.cgt_floor_extra_total_p5,
+            "cgt_floor_extra_total_p50": self.cgt_floor_extra_total_p50,
+            "cgt_floor_extra_total_p95": self.cgt_floor_extra_total_p95,
             # Trajectory (Work Items 1, 10)
             "bridge_by_age_ages": list(self.bridge_by_age_ages),
             "bridge_by_age_p5": list(self.bridge_by_age_p5),
@@ -931,6 +1169,8 @@ class SimulationResults:
             value_basis=data.get("value_basis", "real"),
             near_miss_rate=data.get("near_miss_rate", 1.0),
             near_miss_threshold=data.get("near_miss_threshold", 0.0),
+            near_miss_only_rate=data.get("near_miss_only_rate", 0.0),
+            warnings=tuple(data.get("warnings", ())),
             failure_age_distribution={
                 int(k): v for k, v in data.get("failure_age_distribution", {}).items()
             },
@@ -943,6 +1183,25 @@ class SimulationResults:
             cgt_paid_p5=list(data.get("cgt_paid_p5", [])),
             cgt_paid_p95=list(data.get("cgt_paid_p95", [])),
             cgt_without_floor_p50=list(data.get("cgt_without_floor_p50", [])),
+            income_tax_p50=list(data.get("income_tax_p50", [])),
+            income_tax_total_p5=data.get("income_tax_total_p5", 0.0),
+            income_tax_total_p50=data.get("income_tax_total_p50", 0.0),
+            income_tax_total_p95=data.get("income_tax_total_p95", 0.0),
+            offset_drawn_total_p5=data.get("offset_drawn_total_p5", 0.0),
+            offset_drawn_total_p50=data.get("offset_drawn_total_p50", 0.0),
+            offset_drawn_total_p95=data.get("offset_drawn_total_p95", 0.0),
+            non_offset_drawn_total_p5=data.get("non_offset_drawn_total_p5", 0.0),
+            non_offset_drawn_total_p50=data.get("non_offset_drawn_total_p50", 0.0),
+            non_offset_drawn_total_p95=data.get("non_offset_drawn_total_p95", 0.0),
+            cgt_paid_total_p5=data.get("cgt_paid_total_p5", 0.0),
+            cgt_paid_total_p50=data.get("cgt_paid_total_p50", 0.0),
+            cgt_paid_total_p95=data.get("cgt_paid_total_p95", 0.0),
+            cgt_without_floor_total_p5=data.get("cgt_without_floor_total_p5", 0.0),
+            cgt_without_floor_total_p50=data.get("cgt_without_floor_total_p50", 0.0),
+            cgt_without_floor_total_p95=data.get("cgt_without_floor_total_p95", 0.0),
+            cgt_floor_extra_total_p5=data.get("cgt_floor_extra_total_p5", 0.0),
+            cgt_floor_extra_total_p50=data.get("cgt_floor_extra_total_p50", 0.0),
+            cgt_floor_extra_total_p95=data.get("cgt_floor_extra_total_p95", 0.0),
             # Trajectory (Work Items 1, 10)
             bridge_by_age_ages=list(data.get("bridge_by_age_ages", [])),
             bridge_by_age_p5=list(data.get("bridge_by_age_p5", [])),
@@ -989,6 +1248,14 @@ class ResultsSession:
     """Cached results for 'per earner' mode, keyed by earner label."""
 
 
+class ProfileError(ValueError):
+    """A saved profile is unreadable, malformed, or from an unsupported schema version."""
+
+
+PROFILE_VERSION = 3
+"""Current on-disk profile schema version. Older versions are upgraded on load."""
+
+
 @dataclass
 class Profile:
     """A saved user profile containing inputs and last results.
@@ -1012,62 +1279,41 @@ class Profile:
             "updated_at": self.updated_at,
             "inputs": _serialise_inputs(self.inputs),
             "last_results": self.last_results.summary_dict() if self.last_results else None,
-            "_version": 2,
+            "_version": PROFILE_VERSION,
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Profile:
-        """Deserialise profile from a JSON dict.
-
-        Handles backward compatibility with v1 (legacy-specific) profiles.
+        """Deserialise a profile dict, upgrading older schema versions first.
 
         Raises:
-            ValueError: If ``_version`` is present and greater than the
-                supported version (writes are rejected silently by other
-                code paths), or if the household deserialises to zero
-                earners (corrupt or silently downgraded v1 profile).
-
+            ProfileError: If the data is malformed, or was written by a newer
+                schema version than this application supports.
         """
-        # Validate the schema version up front so unknown/newer versions
-        # fail loudly instead of being silently misparsed as v2.
-        version = data.get("_version")
-        if version is not None and version > 2:
-            raise ValueError(
-                f"Profile '{data.get('profile_name', '?')}' uses schema "
-                f"version {version}, which is newer than this version of "
-                f"DoneByFifty supports (v2).  Upgrade the application "
-                f"before loading this profile."
+        name = data.get("profile_name", "?")
+        version = data.get("_version", 1)
+        if not isinstance(version, int) or not 1 <= version <= PROFILE_VERSION:
+            raise ProfileError(
+                f"Profile '{name}' uses schema version {version!r}; this version of "
+                f"DoneByFifty supports versions 1 to {PROFILE_VERSION}."
             )
-
-        # Upgrade v1 if needed
-        data = _upgrade_v1_profile(data)
-
-        inputs_data = data.get("inputs", {})
-        inputs = _deserialise_inputs(inputs_data) if inputs_data else SimulationInputs()
-
-        # A v1 profile whose detection field was absent would have been
-        # returned unchanged and then parsed as v2 with an empty earner
-        # tuple.  Reject that silently-emptied household rather than
-        # modelling a no-earner household.
-        if not inputs.household.earners:
-            raise ValueError(
-                f"Profile '{data.get('profile_name', '?')}' deserialised "
-                f"to a household with zero earners.  This usually means "
-                f"the profile is a v1 file missing its detection field "
-                f"and was silently misparsed as v2.  Edit the profile "
-                f"to restore its earners, or re-create it in the UI."
+        try:
+            data = _upgrade_v1_profile(data)
+            if data.get("_version", 2) == 2:
+                data = _upgrade_v2_profile(data)
+            inputs_data = data.get("inputs", {})
+            inputs = _deserialise_inputs(inputs_data) if inputs_data else SimulationInputs()
+            results_data = data.get("last_results")
+            last_results = SimulationResults.from_dict(results_data) if results_data else None
+            return cls(
+                profile_name=data.get("profile_name", "Unnamed"),
+                created_at=data.get("created_at", ""),
+                updated_at=data.get("updated_at", ""),
+                inputs=inputs,
+                last_results=last_results,
             )
-
-        results_data = data.get("last_results")
-        last_results = SimulationResults.from_dict(results_data) if results_data else None
-
-        return cls(
-            profile_name=data.get("profile_name", "Unnamed"),
-            created_at=data.get("created_at", ""),
-            updated_at=data.get("updated_at", ""),
-            inputs=inputs,
-            last_results=last_results,
-        )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ProfileError(f"Profile '{name}' is invalid: {exc}") from exc
 
 
 # =============================================================================
@@ -1075,209 +1321,84 @@ class Profile:
 # =============================================================================
 
 
+def _kwargs_for(cls: type[Any], data: dict[str, Any]) -> dict[str, Any]:
+    """Return the entries of ``data`` that are fields of dataclass ``cls``.
+
+    Absent fields keep their dataclass defaults; unknown keys (such as fields
+    removed by a schema upgrade) are ignored.
+    """
+    names = {f.name for f in fields(cls)}
+    return {k: v for k, v in data.items() if k in names}
+
+
 def _serialise_earner(earner: Earner) -> dict[str, Any]:
-    return {
-        "label": earner.label,
-        "salary": earner.salary,
-        "super_balance": earner.super_balance,
-        "salary_growth_rate": earner.salary_growth_rate,
-        "retirement_age": earner.retirement_age,
-        "birth_year": earner.birth_year,
-        "super_access_age": earner.super_access_age,
-        "sg_rate": earner.sg_rate,
-        "employment_type": earner.employment_type,
-        "pt_days_per_week": earner.pt_days_per_week,
-        "pt_rate_mode": earner.pt_rate_mode,
-        "pt_salary_pct": earner.pt_salary_pct,
-        "pt_start_age": earner.pt_start_age if earner.pt_days_per_week > 0 else -1,
-        "pt_end_age": earner.pt_end_age if earner.pt_days_per_week > 0 else 0,
-        "pt_daily_rate": earner.pt_daily_rate,
-        "pt_weeks_per_year": earner.pt_weeks_per_year,
-        "personal_super_contributions_total_p_a": earner.personal_super_contributions_total_p_a,
-        "non_concessional_contributions_p_a": earner.non_concessional_contributions_p_a,
-        "super_growth_pct": earner.super_growth_pct,
-        "super_glide_end_year": earner.super_glide_end_year,
-        "super_glide_target_pct": earner.super_glide_target_pct,
-        "super_asset_class": earner.super_asset_class,
-        "super_mean_override": earner.super_mean_override,
-        "super_std_override": earner.super_std_override,
-        "self_employed_income": earner.self_employed_income,
-        "self_employed_growth_rate": earner.self_employed_growth_rate,
-        "self_employed_sg_applies": earner.self_employed_sg_applies,
-    }
+    return {f.name: getattr(earner, f.name) for f in fields(earner)}
 
 
 def _deserialise_earner(data: dict[str, Any]) -> Earner:
-    sacrifice = data.get("personal_super_contributions_total_p_a")
-    # Backward compatibility: map legacy is_employed to employment_type
-    # Only use is_employed fallback when employment_type is NOT present
-    if "employment_type" in data:
-        emp_type = data["employment_type"]
-    else:
-        # Legacy profile: map is_employed bool -> employment_type
-        is_emp = data.get("is_employed", True)
-        emp_type = "employed" if is_emp else "not_employed"
-    return Earner(
-        label=data.get("label", "Earner 1"),
-        salary=data.get("salary", 100_000.0),
-        super_balance=data.get("super_balance", 100_000.0),
-        salary_growth_rate=data.get("salary_growth_rate", 0.005),
-        retirement_age=data.get("retirement_age", 50),
-        birth_year=data.get("birth_year"),
-        super_access_age=data.get("super_access_age", 60),
-        sg_rate=data.get("sg_rate", 0.12),
-        employment_type=emp_type,
-        pt_days_per_week=data.get("pt_days_per_week", 0.0),
-        pt_start_age=data.get("pt_start_age", -1),
-        pt_end_age=data.get("pt_end_age", 0),
-        pt_daily_rate=data.get("pt_daily_rate", 3_000.0),
-        pt_weeks_per_year=data.get("pt_weeks_per_year", 48.0),
-        pt_rate_mode=data.get("pt_rate_mode", "daily_rate"),
-        pt_salary_pct=data.get("pt_salary_pct", 0.0),
-        personal_super_contributions_total_p_a=sacrifice if sacrifice is not None else None,
-        non_concessional_contributions_p_a=data.get("non_concessional_contributions_p_a", 0.0),
-        super_growth_pct=data.get("super_growth_pct", 70.0),
-        super_glide_end_year=data.get("super_glide_end_year"),
-        super_glide_target_pct=data.get("super_glide_target_pct", 30.0),
-        super_asset_class=data.get("super_asset_class", "equity"),
-        super_mean_override=data.get("super_mean_override"),
-        super_std_override=data.get("super_std_override"),
-        self_employed_income=data.get("self_employed_income", 0.0),
-        self_employed_growth_rate=data.get("self_employed_growth_rate", 0.005),
-        self_employed_sg_applies=data.get("self_employed_sg_applies", False),
-    )
+    kwargs = _kwargs_for(Earner, data)
+    # Legacy profiles stored is_employed instead of employment_type
+    if "employment_type" not in data and "is_employed" in data:
+        kwargs["employment_type"] = "employed" if data["is_employed"] else "not_employed"
+    return Earner(**kwargs)
 
 
 def _serialise_child(child: Child) -> dict[str, Any]:
-    return {
-        "label": child.label,
-        "age": child.age,
-        "education_schedule": [[age, cost] for age, cost in child.education_schedule],
-    }
+    data: dict[str, Any] = {f.name: getattr(child, f.name) for f in fields(child)}
+    data["education_schedule"] = [[age, cost] for age, cost in child.education_schedule]
+    return data
 
 
 def _deserialise_child(data: dict[str, Any]) -> Child:
-    schedule_raw = data.get("education_schedule", [])
-    return Child(
-        label=data.get("label", "Child 1"),
-        age=data.get("age", 5),
-        education_schedule=tuple(tuple(pair) for pair in schedule_raw),
-    )
+    kwargs = _kwargs_for(Child, data)
+    if "education_schedule" in kwargs:
+        kwargs["education_schedule"] = tuple(tuple(pair) for pair in kwargs["education_schedule"])
+    return Child(**kwargs)
 
 
 def _serialise_mortgage(mortgage: MortgageAccount) -> dict[str, Any]:
-    return {
-        "label": mortgage.label,
-        "principal": mortgage.principal,
-        "interest_rate": mortgage.interest_rate,
-        "monthly_payment": mortgage.monthly_payment,
-        "offset_accounts": list(mortgage.offset_accounts),
-        "offset_reserve_mode": mortgage.offset_reserve_mode,
-        "offset_reserve_floor": mortgage.offset_reserve_floor,
-        "loan_term_end_age": mortgage.loan_term_end_age,
-        "interest_rate_stochastic": mortgage.interest_rate_stochastic,
-        "interest_rate_vol": mortgage.interest_rate_vol,
-        "interest_rate_kappa": mortgage.interest_rate_kappa,
-        "interest_rate_theta": mortgage.interest_rate_theta,
-        "interest_rate_corr": mortgage.interest_rate_corr,
-    }
+    data: dict[str, Any] = {f.name: getattr(mortgage, f.name) for f in fields(mortgage)}
+    data["offset_accounts"] = list(mortgage.offset_accounts)
+    return data
 
 
 def _deserialise_mortgage(data: dict[str, Any]) -> MortgageAccount:
-    return MortgageAccount(
-        label=data.get("label", "Mortgage 1"),
-        principal=data.get("principal", 500_000.0),
-        interest_rate=data.get("interest_rate", 0.0605),
-        monthly_payment=data.get("monthly_payment", 0.0),
-        offset_accounts=tuple(data.get("offset_accounts", [])),
-        offset_reserve_mode=data.get("offset_reserve_mode", "fixed"),
-        offset_reserve_floor=data.get("offset_reserve_floor", 0.0),
-        loan_term_end_age=data.get("loan_term_end_age"),
-        interest_rate_stochastic=data.get("interest_rate_stochastic", False),
-        interest_rate_vol=data.get("interest_rate_vol"),
-        interest_rate_kappa=data.get("interest_rate_kappa"),
-        interest_rate_theta=data.get("interest_rate_theta"),
-        interest_rate_corr=data.get("interest_rate_corr"),
-    )
+    kwargs = _kwargs_for(MortgageAccount, data)
+    if "offset_accounts" in kwargs:
+        kwargs["offset_accounts"] = tuple(kwargs["offset_accounts"])
+    return MortgageAccount(**kwargs)
 
 
 def _serialise_account(account: InvestmentAccount) -> dict[str, Any]:
-    # Ownership is stored as a dict of str(earner_index) → share for JSON.
-    # On load, _deserialise_account coerces it back to an Ownership.
-    return {
-        "label": account.label,
-        "market_value": account.market_value,
-        "cost_basis": account.cost_basis,
-        "asset_class": account.asset_class,
-        "tax_jurisdiction": account.tax_jurisdiction,
-        "cgt_rate": account.cgt_rate,
-        "is_offset": account.is_offset,
-        "fee_rate": account.fee_rate,
-        "interest_rate": account.interest_rate,
-        "ownership": {str(k): v for k, v in account.ownership.items()},
-    }
+    data: dict[str, Any] = {f.name: getattr(account, f.name) for f in fields(account)}
+    # JSON object keys are strings, so ownership is stored as str(earner_index) -> share
+    data["ownership"] = {str(k): v for k, v in account.ownership.items()}
+    return data
 
 
 def _deserialise_account(data: dict[str, Any]) -> InvestmentAccount:
-    raw_ownership = data.get("ownership", {"0": 1.0})
-    ownership_dict = {int(k): v for k, v in raw_ownership.items()}
-    # Validate ownership sums to ~1.0 — hard-block if malformed
-    total = sum(ownership_dict.values())
-    if abs(total - 1.0) > 0.001:
-        raise ValueError(
-            f"Account '{data.get('label', '?')}' ownership sums to {total:.4f}, "
-            f"expected 1.0.  Each account's ownership shares must sum to exactly "
-            f"100% before the simulation can proceed."
-        )
-    return InvestmentAccount(
-        label=data.get("label", "Account 1"),
-        market_value=data.get("market_value", 0.0),
-        cost_basis=data.get("cost_basis", 0.0),
-        asset_class=data.get("asset_class", "equity"),
-        tax_jurisdiction=data.get("tax_jurisdiction", "au"),
-        cgt_rate=data.get("cgt_rate", 0.30),
-        is_offset=data.get("is_offset", False),
-        fee_rate=data.get("fee_rate", 0.0),
-        interest_rate=data.get("interest_rate", 0.0),
-        ownership=Ownership(ownership_dict),
-    )
+    kwargs = _kwargs_for(InvestmentAccount, data)
+    if "ownership" in kwargs:
+        kwargs["ownership"] = Ownership({int(k): v for k, v in kwargs["ownership"].items()})
+    return InvestmentAccount(**kwargs)
+
+
+def _serialise_household(household: Household) -> dict[str, Any]:
+    return {
+        "earners": [_serialise_earner(e) for e in household.earners],
+        "children": [_serialise_child(c) for c in household.children],
+        "mortgages": [_serialise_mortgage(m) for m in household.mortgages],
+        "investment_accounts": [_serialise_account(a) for a in household.investment_accounts],
+        "base_living_expenses": household.base_living_expenses,
+        "retirement_target": household.retirement_target,
+    }
 
 
 def _serialise_inputs(inputs: SimulationInputs) -> dict[str, Any]:
-    return {
-        "n_iterations": inputs.n_iterations,
-        "inflation": inputs.inflation,
-        "simulation_start_age": inputs.simulation_start_age,
-        "simulation_start_year": inputs.simulation_start_year,
-        "cgt_on_drawdowns": inputs.cgt_on_drawdowns,
-        "sell_strategy": inputs.sell_strategy,
-        "sell_order": list(inputs.sell_order),
-        "conc_cap_growth_rate": inputs.conc_cap_growth_rate,
-        "sg_max_base_growth_rate": inputs.sg_max_base_growth_rate,
-        "seed": inputs.seed,
-        "super_fee_rate": inputs.super_fee_rate,
-        "mls_enabled": inputs.mls_enabled,
-        "mls_tiered": inputs.mls_tiered,
-        "mls_threshold": inputs.mls_threshold,
-        "mls_rate": inputs.mls_rate,
-        "bracket_growth_rate": inputs.bracket_growth_rate,
-        "div293_threshold": inputs.div293_threshold,
-        "div293_rate": inputs.div293_rate,
-        "div293_growth_rate": inputs.div293_growth_rate,
-        "surplus_investment_pct": inputs.surplus_investment_pct,
-        "stochastic_inflation": inputs.stochastic_inflation,
-        "success_threshold": inputs.success_threshold,
-        "household": {
-            "earners": [_serialise_earner(e) for e in inputs.household.earners],
-            "children": [_serialise_child(c) for c in inputs.household.children],
-            "mortgages": [_serialise_mortgage(m) for m in inputs.household.mortgages],
-            "investment_accounts": [
-                _serialise_account(a) for a in inputs.household.investment_accounts
-            ],
-            "base_living_expenses": inputs.household.base_living_expenses,
-            "retirement_target": inputs.household.retirement_target,
-        },
-    }
+    data: dict[str, Any] = {f.name: getattr(inputs, f.name) for f in fields(inputs)}
+    data["sell_order"] = list(inputs.sell_order)
+    data["household"] = _serialise_household(inputs.household)
+    return data
 
 
 def _repair_offset_links(
@@ -1287,143 +1408,76 @@ def _repair_offset_links(
     """Rebuild mortgage→offset linkages for loaded profiles.
 
     Called at deserialisation time to repair profiles that were saved
-    before ``_link_offsets_to_mortgages()`` populated ``offset_accounts``
-    on each mortgage.  Without this step the simulation ignores offset
-    balances during mortgage amortisation, leaving a large fraction of
-    the loan outstanding at horizon.
+    before ``offset_accounts`` was populated on each mortgage.  Without this
+    step the simulation ignores offset balances during mortgage amortisation.
 
     Strategy:
     * Single-mortgage households: link all ``is_offset`` accounts to that
       mortgage unconditionally (the common case).
-    * Multi-mortgage households: only rebuild links when all mortgages
-      have an empty ``offset_accounts`` AND there is exactly one offset
-      account — link it to the first mortgage.  In all other multi-
-      mortgage cases we cannot guess the intended mapping and leave the
-      data as-is (the interactive wizard is required to set up the links).
+    * Multi-mortgage households: only rebuild links when no mortgage has any
+      offset account and there is exactly one offset account — link it to the
+      first mortgage.  In all other multi-mortgage cases the intended mapping
+      cannot be inferred, so the data is left as-is for the wizard to repair.
     """
-    if not mortgages or not accounts:
+    offset_labels = tuple(a.label for a in accounts if a.is_offset)
+    if not mortgages or not offset_labels:
         return mortgages
-
-    offset_accounts = [a for a in accounts if a.is_offset]
-    if not offset_accounts:
-        return mortgages  # nothing to link
-
-    offset_labels = tuple(a.label for a in offset_accounts)
 
     if len(mortgages) == 1:
-        # Single mortgage: all offsets belong to it
-        m = mortgages[0]
-        if set(m.offset_accounts) != set(offset_labels):
-            repaired = MortgageAccount(
-                label=m.label,
-                principal=m.principal,
-                interest_rate=m.interest_rate,
-                monthly_payment=m.monthly_payment,
-                offset_accounts=offset_labels,
-                offset_reserve_mode=m.offset_reserve_mode,
-                offset_reserve_floor=m.offset_reserve_floor,
-                loan_term_end_age=m.loan_term_end_age,
-                interest_rate_stochastic=m.interest_rate_stochastic,
-                interest_rate_vol=m.interest_rate_vol,
-                interest_rate_kappa=m.interest_rate_kappa,
-                interest_rate_theta=m.interest_rate_theta,
-                interest_rate_corr=m.interest_rate_corr,
-            )
-            return (repaired,)
+        if set(mortgages[0].offset_accounts) != set(offset_labels):
+            return (replace(mortgages[0], offset_accounts=offset_labels),)
         return mortgages
 
-    # Multi-mortgage: attempt repair only when simple enough to guess
-    all_empty = all(len(m.offset_accounts) == 0 for m in mortgages)
-    if all_empty and len(offset_accounts) == 1:
-        # One offset, multiple mortgages — link to first as best guess
-        result: list[MortgageAccount] = []
-        for i, m in enumerate(mortgages):
-            if i == 0:
-                result.append(
-                    MortgageAccount(
-                        label=m.label,
-                        principal=m.principal,
-                        interest_rate=m.interest_rate,
-                        monthly_payment=m.monthly_payment,
-                        offset_accounts=(offset_labels[0],),
-                        offset_reserve_mode=m.offset_reserve_mode,
-                        offset_reserve_floor=m.offset_reserve_floor,
-                        loan_term_end_age=m.loan_term_end_age,
-                        interest_rate_stochastic=m.interest_rate_stochastic,
-                        interest_rate_vol=m.interest_rate_vol,
-                        interest_rate_kappa=m.interest_rate_kappa,
-                        interest_rate_theta=m.interest_rate_theta,
-                        interest_rate_corr=m.interest_rate_corr,
-                    )
-                )
-            else:
-                result.append(m)
-        return tuple(result)
+    if len(offset_labels) == 1 and all(not m.offset_accounts for m in mortgages):
+        return (replace(mortgages[0], offset_accounts=offset_labels), *mortgages[1:])
+    return mortgages
 
-    return mortgages  # too ambiguous; leave for interactive repair
+
+def _deserialise_household(data: dict[str, Any]) -> Household:
+    accounts = tuple(_deserialise_account(a) for a in data.get("investment_accounts", []))
+    mortgages = _repair_offset_links(
+        tuple(_deserialise_mortgage(m) for m in data.get("mortgages", [])),
+        accounts,
+    )
+    kwargs = _kwargs_for(Household, data)
+    kwargs.update(
+        earners=tuple(_deserialise_earner(e) for e in data.get("earners", [])),
+        children=tuple(_deserialise_child(c) for c in data.get("children", [])),
+        mortgages=mortgages,
+        investment_accounts=accounts,
+    )
+    return Household(**kwargs)
 
 
 def _deserialise_inputs(data: dict[str, Any]) -> SimulationInputs:
-    household_data = data.get("household", {})
-
-    accounts = tuple(_deserialise_account(a) for a in household_data.get("investment_accounts", []))
-    mortgages_raw = tuple(_deserialise_mortgage(m) for m in household_data.get("mortgages", []))
-    # Repair offset→mortgage links that may be missing in older profiles
-    mortgages = _repair_offset_links(mortgages_raw, accounts)
-
-    household = Household(
-        earners=tuple(_deserialise_earner(e) for e in household_data.get("earners", [])),
-        children=tuple(_deserialise_child(c) for c in household_data.get("children", [])),
-        mortgages=mortgages,
-        investment_accounts=accounts,
-        base_living_expenses=household_data.get("base_living_expenses", 60_000.0),
-        retirement_target=household_data.get("retirement_target", 80_000.0),
-    )
-
-    return SimulationInputs(
-        household=household,
-        n_iterations=data.get("n_iterations", 5_000),
-        inflation=data.get("inflation", 0.025),
-        simulation_start_age=data.get("simulation_start_age", 37),
-        simulation_start_year=data.get("simulation_start_year", 2026),
-        cgt_on_drawdowns=data.get("cgt_on_drawdowns", True),
-        sell_strategy=data.get("sell_strategy", "waterfall"),
-        sell_order=tuple(data.get("sell_order", [])),
-        conc_cap_growth_rate=data.get("conc_cap_growth_rate", 0.03),
-        sg_max_base_growth_rate=data.get("sg_max_base_growth_rate", 0.03),
-        seed=data.get("seed"),
-        super_fee_rate=data.get("super_fee_rate", 0.0085),
-        mls_enabled=data.get("mls_enabled", False),
-        mls_tiered=data.get("mls_tiered", True),
-        mls_threshold=data.get("mls_threshold", 90_000.0),
-        mls_rate=data.get("mls_rate", 0.01),
-        bracket_growth_rate=data.get("bracket_growth_rate", 0.025),
-        div293_threshold=data.get("div293_threshold", 250_000.0),
-        div293_rate=data.get("div293_rate", 0.15),
-        div293_growth_rate=data.get("div293_growth_rate", 0.025),
-        surplus_investment_pct=data.get("surplus_investment_pct", 0.0),
-        stochastic_inflation=data.get("stochastic_inflation", False),
-        success_threshold=data.get("success_threshold", 0.95),
-    )
+    kwargs = _kwargs_for(SimulationInputs, data)
+    kwargs["household"] = _deserialise_household(data.get("household", {}))
+    if "sell_order" in kwargs:
+        kwargs["sell_order"] = tuple(kwargs["sell_order"])
+    return SimulationInputs(**kwargs)
 
 
 # =============================================================================
-# BACKWARD COMPATIBILITY (v1 → v2 profile upgrade)
+# BACKWARD COMPATIBILITY (profile schema upgrades)
 # =============================================================================
+
+
+def _given(**values: Any) -> dict[str, Any]:
+    """Keep only the keyword arguments whose value was present (not None)."""
+    return {k: v for k, v in values.items() if v is not None}
+
+
+def _v1_age(value: object) -> int | None:
+    """v1 used 0 or a negative number for "no PT age set"; map those to None."""
+    return value if isinstance(value, int) and value > 0 else None
 
 
 def _upgrade_v1_profile(data: dict[str, Any]) -> dict[str, Any]:
-    """Detect and convert old-format v1 profiles to v2.
+    """Convert a v1 profile (``inputs.finances`` layout) to the v2 layout.
 
-    v1 profiles stored data under ``inputs.finances.salary_h`` etc.
-    v2 uses ``inputs.household.earners``, ``inputs.household.children``, etc.
-
-    Args:
-        data: Raw profile dict (possibly v1 format).
-
-    Returns:
-        Upgraded dict in v2 format, or unchanged data if already v2.
-
+    Returns ``data`` unchanged when it is not a v1 profile.  Only values present
+    in the v1 file are carried over; anything missing takes the model default,
+    so no household-specific figures are invented.
     """
     if "_version" in data and data["_version"] >= 2:
         return data  # Already v2+
@@ -1431,59 +1485,49 @@ def _upgrade_v1_profile(data: dict[str, Any]) -> dict[str, Any]:
     inputs = data.get("inputs", {})
     finances = inputs.get("finances", {})
 
-    # Robust v1 detection: require *multiple* v1-only fields.  Relying on
-    # a single field (e.g. salary_h) meant a v1 profile that happened to
-    # lack that one field was returned unchanged and then misparsed as
-    # v2 — silently producing an empty household.  The v1 schema always
-    # had salary_h, salary_w, super_h, super_w and living_expenses; a
-    # genuine v2 profile has none of these under inputs.finances.
+    # Require several v1-only fields: a single marker could be absent from a
+    # genuine v1 file and the data would then be misparsed as v2.
     v1_markers = ("salary_h", "salary_w", "super_h", "super_w", "living_expenses")
     if not any(m in finances for m in v1_markers):
         return data  # Not a v1 profile (or no data at all)
 
-    salary_h = finances.get("salary_h", 320_000.0)
-    salary_w = finances.get("salary_w", 200_000.0)
-    super_h = finances.get("super_h", 310_720.71)
-    super_w = finances.get("super_w", 238_380.63)
-    child_age = finances.get("child_age", 2)
-
-    # Build earners
+    # v1 files carry no birth year, so super access age is set explicitly.
     earner1 = Earner(
-        label="Earner 1",
-        salary=salary_h,
-        super_balance=super_h,
-        salary_growth_rate=0.03,
-        retirement_age=inputs.get("retire_age", 50),
         super_access_age=60,
-        pt_days_per_week=inputs.get("pt_days_per_week", 0.0),
-        pt_rate_mode=inputs.get("pt_rate_mode", "daily_rate"),
-        pt_salary_pct=inputs.get("pt_salary_pct", 0.0),
-        pt_start_age=inputs.get("pt_start_age", 50),
-        pt_end_age=inputs.get("pt_end_age", 0),
+        **_given(
+            label="Earner 1",
+            salary=finances.get("salary_h"),
+            super_balance=finances.get("super_h"),
+            retirement_age=inputs.get("retire_age"),
+            pt_days_per_week=inputs.get("pt_days_per_week"),
+            pt_rate_mode=inputs.get("pt_rate_mode"),
+            pt_salary_pct=inputs.get("pt_salary_pct"),
+            pt_start_age=_v1_age(inputs.get("pt_start_age")),
+            pt_end_age=_v1_age(inputs.get("pt_end_age")),
+        ),
     )
     earner2 = Earner(
-        label="Earner 2",
-        salary=salary_w,
-        super_balance=super_w,
-        salary_growth_rate=0.025,
-        retirement_age=inputs.get("retire_age", 50),
         super_access_age=60,
+        **_given(
+            label="Earner 2",
+            salary=finances.get("salary_w"),
+            super_balance=finances.get("super_w"),
+            retirement_age=inputs.get("retire_age"),
+        ),
     )
 
-    # Build child
     children: list[Child] = []
-    if child_age >= 0:
-        from primitives import EDU_SCHEDULE_TODAY
-
+    child_age = finances.get("child_age")
+    if child_age is not None and child_age >= 0:
         children.append(
             Child(
                 label="Child 1",
                 age=child_age,
-                education_schedule=tuple((age, cost) for age, cost in EDU_SCHEDULE_TODAY.items()),
+                education_schedule=DEFAULT_EDU_SCHEDULE,
             )
         )
 
-    # Build mortgage
+    offset_bal = finances.get("offset", 0.0)
     mortgages: list[MortgageAccount] = []
     mortgage_principal = finances.get("mortgage", 0.0)
     if mortgage_principal > 0:
@@ -1491,15 +1535,11 @@ def _upgrade_v1_profile(data: dict[str, Any]) -> dict[str, Any]:
             MortgageAccount(
                 label="Mortgage 1",
                 principal=mortgage_principal,
-                interest_rate=0.0605,
-                monthly_payment=5491.43,
-                offset_accounts=("Offset 1",),
+                offset_accounts=("Offset 1",) if offset_bal > 0 else (),
             )
         )
 
-    # Build investment accounts
     accounts: list[InvestmentAccount] = []
-    offset_bal = finances.get("offset", 0.0)
     if offset_bal > 0:
         accounts.append(
             InvestmentAccount(
@@ -1507,71 +1547,84 @@ def _upgrade_v1_profile(data: dict[str, Any]) -> dict[str, Any]:
                 market_value=offset_bal,
                 cost_basis=offset_bal,
                 asset_class="cash",
-                tax_jurisdiction="au",
-                cgt_rate=0.0,
                 is_offset=True,
             )
         )
-    uk_etfs = finances.get("uk_etfs", 0.0)
-    uk_basis = finances.get("uk_basis", 0.0)
-    if uk_etfs > 0:
-        accounts.append(
-            InvestmentAccount(
-                label="UK ETFs",
-                market_value=uk_etfs,
-                cost_basis=uk_basis,
-                asset_class="equity",
-                tax_jurisdiction="uk",
-                cgt_rate=0.30,
+    for label, value_key, basis_key in (
+        ("UK ETFs", "uk_etfs", "uk_basis"),
+        ("AU ETFs", "au_etfs", "au_basis"),
+    ):
+        value = finances.get(value_key, 0.0)
+        if value > 0:
+            accounts.append(
+                InvestmentAccount(
+                    label=label,
+                    market_value=value,
+                    cost_basis=finances.get(basis_key, 0.0),
+                    asset_class="equity",
+                )
             )
-        )
-    au_etfs = finances.get("au_etfs", 0.0)
-    au_basis = finances.get("au_basis", 0.0)
-    if au_etfs > 0:
-        accounts.append(
-            InvestmentAccount(
-                label="AU ETFs",
-                market_value=au_etfs,
-                cost_basis=au_basis,
-                asset_class="equity",
-                tax_jurisdiction="au",
-                cgt_rate=0.30,
-            )
-        )
 
     household = Household(
         earners=(earner1, earner2),
         children=tuple(children),
         mortgages=tuple(mortgages),
         investment_accounts=tuple(accounts),
-        base_living_expenses=finances.get("living_expenses", 75_000.0),
-        retirement_target=100_000.0,
+        **_given(base_living_expenses=finances.get("living_expenses")),
     )
 
-    upgraded: dict[str, Any] = {
+    return {
         "_version": 2,
         "profile_name": data.get("profile_name", "Upgraded (v1)"),
         "created_at": data.get("created_at", ""),
         "updated_at": data.get("updated_at", ""),
         "inputs": {
-            "household": {
-                "earners": [_serialise_earner(e) for e in household.earners],
-                "children": [_serialise_child(c) for c in household.children],
-                "mortgages": [_serialise_mortgage(m) for m in household.mortgages],
-                "investment_accounts": [
-                    _serialise_account(a) for a in household.investment_accounts
-                ],
-                "base_living_expenses": household.base_living_expenses,
-                "retirement_target": household.retirement_target,
-            },
-            "n_iterations": inputs.get("n_iterations", 5_000),
-            "inflation": inputs.get("inflation", 0.025),
-            "simulation_start_age": inputs.get("simulation_start_age", 37),
-            "cgt_on_drawdowns": inputs.get("cgt_on_drawdowns", True),
+            "household": _serialise_household(household),
+            **_given(
+                n_iterations=inputs.get("n_iterations"),
+                inflation=inputs.get("inflation"),
+                simulation_start_age=inputs.get("simulation_start_age"),
+                cgt_on_drawdowns=inputs.get("cgt_on_drawdowns"),
+            ),
             "sell_strategy": "waterfall",
             "sell_order": [],
         },
         "last_results": data.get("last_results"),
     }
 
+
+def _upgrade_v2_profile(data: dict[str, Any]) -> dict[str, Any]:
+    """Convert a v2 profile dict to v3.
+
+    v2 used sentinel values for "not set": ``pt_start_age`` -1, ``pt_end_age``
+    0 and an account ``interest_rate`` of 0.0 (which meant "asset-class
+    default").  v3 uses None for all three.  Fields removed in v3
+    (``tax_jurisdiction``, ``cgt_rate``, ``div293_growth_rate``) are ignored
+    by the loaders, so they need no explicit removal here.
+    """
+    inputs_data = data.get("inputs")
+    if not inputs_data:
+        return {**data, "_version": PROFILE_VERSION}
+
+    household = dict(inputs_data.get("household", {}))
+    household["earners"] = [_upgrade_v2_earner(e) for e in household.get("earners", [])]
+    household["investment_accounts"] = [
+        _upgrade_v2_account(a) for a in household.get("investment_accounts", [])
+    ]
+    return {**data, "_version": PROFILE_VERSION, "inputs": {**inputs_data, "household": household}}
+
+
+def _upgrade_v2_earner(earner: dict[str, Any]) -> dict[str, Any]:
+    upgraded = dict(earner)
+    if upgraded.get("pt_start_age") == -1:
+        upgraded["pt_start_age"] = None
+    if upgraded.get("pt_end_age") == 0:
+        upgraded["pt_end_age"] = None
+    return upgraded
+
+
+def _upgrade_v2_account(account: dict[str, Any]) -> dict[str, Any]:
+    upgraded = dict(account)
+    if upgraded.get("interest_rate") == 0.0:
+        upgraded["interest_rate"] = None
     return upgraded

@@ -1,7 +1,9 @@
 """Profile save/load/list/delete operations.
 
-All file I/O lives here. Uses JSON files, one per profile, stored in a
-``profiles/`` directory relative to the executable or script location.
+All file I/O lives here. Each profile is one JSON file in a per-user data
+directory (see ``_profiles_dir``). Profiles are addressed by file name, as
+returned by ``list_profiles``; ``profile_filename`` derives the file name
+from a profile name.
 """
 
 from __future__ import annotations
@@ -14,32 +16,24 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from models import Profile
+from .models import Profile, ProfileError
 
 # =============================================================================
-# PATH RESOLUTION (handles PyInstaller-bundled executables)
+# PATH RESOLUTION
 # =============================================================================
 
 
 def _profiles_dir() -> Path:
-    """Resolve the profiles directory path — always the folder
-    containing the actual exe on disk, regardless of build tool
-    or how/where the exe was launched from.
-    """  # noqa: D205
-    if "__compiled__" in globals():
-        # Nuitka (onefile or standalone): sys.argv[0] is the real exe path,
-        # NOT the temp extraction dir. This is reliable in both modes.
-        base = Path(sys.argv[0]).resolve().parent
-    elif getattr(sys, "frozen", False):
-        # PyInstaller
-        base = Path(sys.executable).resolve().parent
-    else:
-        # Plain python main.py
-        base = Path(__file__).resolve().parent
+    r"""Return the directory profiles are stored in.  The directory is not created.
 
-    profiles_path = base / "profiles"
-    profiles_path.mkdir(exist_ok=True)
-    return profiles_path
+    Linux and macOS: ``$XDG_DATA_HOME/donebyfifty/profiles`` (default
+    ``~/.local/share``).  Windows: ``%APPDATA%\donebyfifty\profiles``.
+    """
+    if sys.platform == "win32":
+        base = Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming")
+    else:
+        base = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share")
+    return base / "donebyfifty" / "profiles"
 
 
 def _sanitise_filename(name: str) -> str:
@@ -60,6 +54,20 @@ def _sanitise_filename(name: str) -> str:
     return safe[:120]
 
 
+def profile_filename(name: str) -> str:
+    """Return the file name a profile called ``name`` is stored under."""
+    return _sanitise_filename(name) + ".json"
+
+
+def profile_exists(name: str) -> bool:
+    """Return True if a profile file already exists for ``name``.
+
+    Different names can sanitise to the same file name, so callers should
+    confirm with the user before overwriting.
+    """
+    return (_profiles_dir() / profile_filename(name)).is_file()
+
+
 # =============================================================================
 # CRUD OPERATIONS
 # =============================================================================
@@ -69,9 +77,9 @@ def save_profile(profile: Profile) -> Path:
     """Save a profile to disk as a JSON file.
 
     Write is atomic: data is flushed to a temporary file in the same
-    directory, ``fsync`` ed, ``os.replace`` ed into place, then ``chmod`` ed
-    to ``0o600``.  A crash mid-write therefore leaves the previous profile
-    intact rather than truncating it to a corrupt partial file.
+    directory, ``fsync`` ed, then ``os.replace`` ed over the target.  A crash
+    or error mid-write leaves the previous profile intact.  Errors are not
+    retried through another path; ``OSError`` propagates to the caller.
 
     Args:
         profile: The profile to save. Its ``updated_at`` is set to now.
@@ -81,121 +89,112 @@ def save_profile(profile: Profile) -> Path:
 
     Raises:
         OSError: If the profiles directory cannot be written to.
+        ValueError: If the profile contains NaN or infinity.
 
     """
     profile.updated_at = datetime.now(timezone.utc).isoformat()
     if not profile.created_at:
         profile.created_at = profile.updated_at
 
-    filename = _sanitise_filename(profile.profile_name) + ".json"
-    path = _profiles_dir() / filename
-    payload = json.dumps(profile.to_dict(), indent=2)
+    directory = _profiles_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / profile_filename(profile.profile_name)
+    payload = json.dumps(profile.to_dict(), indent=2, allow_nan=False)
 
+    fd, tmp_name = tempfile.mkstemp(dir=directory, prefix=".profile-", suffix=".tmp")
     try:
-        fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=".profile-", suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as tmp:
-                tmp.write(payload)
-                tmp.flush()
-                os.fsync(tmp.fileno())
-            os.chmod(tmp_name, 0o600)
-            os.replace(tmp_name, path)
-        except OSError:
-            # Clean up the temp file if anything failed before os.replace.
-            try:
-                os.unlink(tmp_name)
-            except OSError:
-                pass
-            raise
-    except OSError:
-        # Fall back to legacy behaviour if the temp-file dance itself fails
-        # (e.g. read-only filesystem).  Preserves the previous API contract.
-        path.write_text(payload, encoding="utf-8")
-        try:
-            os.chmod(path, 0o600)
-        except OSError:
-            pass
+        with os.fdopen(fd, "w", encoding="utf-8") as tmp:
+            tmp.write(payload)
+            tmp.flush()
+            os.fsync(tmp.fileno())
+        os.chmod(tmp_name, 0o600)
+        os.replace(tmp_name, path)
+    except BaseException:
+        Path(tmp_name).unlink(missing_ok=True)
+        raise
     return path
 
 
-def load_profile(profile_name: str) -> Profile:
-    """Load a single profile by name (without ``.json`` extension).
+def load_profile(file: str | Path) -> Profile:
+    """Load a profile from a file name as returned by ``list_profiles``.
+
+    Any directory part of ``file`` is ignored, so the path cannot escape the
+    profiles directory.
 
     Args:
-        profile_name: The profile name (filename stem).
+        file: The profile's file name (e.g. ``"My plan.json"``).
 
     Returns:
         The deserialised ``Profile``.
 
     Raises:
-        FileNotFoundError: If no profile with that name exists.
-        json.JSONDecodeError: If the profile file is corrupt.
+        FileNotFoundError: If the file does not exist.
+        ProfileError: If the file is not valid JSON, is not a JSON object, or
+            cannot be deserialised (including unsupported schema versions).
 
     """
-    filename = _sanitise_filename(profile_name) + ".json"
-    path = _profiles_dir() / filename
-    data = json.loads(path.read_text(encoding="utf-8"))
+    path = _profiles_dir() / Path(file).name
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except ValueError as exc:  # JSONDecodeError and UnicodeDecodeError
+        raise ProfileError(f"Profile file '{path.name}' is not valid JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ProfileError(f"Profile file '{path.name}' does not contain a JSON object.")
     return Profile.from_dict(data)
 
 
 def list_profiles() -> list[dict[str, Any]]:
     """List all saved profiles with metadata.
 
-    Returns:
-        A list of dicts with keys: ``name``, ``created_at``, ``updated_at``,
-        ``num_earners``, ``num_children``, ``p_success`` (or None).
+    Every entry has the keys ``file``, ``name``, ``created_at``,
+    ``updated_at``, ``num_earners``, ``num_children``, ``p_success`` (or None)
+    and ``corrupt``.  Unreadable or invalid files are listed with
+    ``corrupt=True`` and zeroed metadata so the user can still delete them.
 
     """
-    profiles_dir = _profiles_dir()
     results: list[dict[str, Any]] = []
-
-    for fpath in sorted(profiles_dir.glob("*.json")):
+    for path in sorted(_profiles_dir().glob("*.json")):
         try:
-            data = json.loads(fpath.read_text(encoding="utf-8"))
-            profile = Profile.from_dict(data)
-            last_run = profile.last_results
+            profile = load_profile(path.name)
+        except (OSError, ProfileError):
             results.append(
                 {
-                    "name": profile.profile_name,
-                    "created_at": profile.created_at,
-                    "updated_at": profile.updated_at,
-                    "num_earners": profile.inputs.household.num_earners,
-                    "num_children": profile.inputs.household.num_children,
-                    "p_success": last_run.p_success if last_run else None,
-                    "file": fpath.name,
-                }
-            )
-        except Exception:
-            # Skip corrupt or unparseable files
-            results.append(
-                {
-                    "name": fpath.stem,
+                    "file": path.name,
+                    "name": path.stem,
                     "created_at": "",
                     "updated_at": "",
                     "num_earners": 0,
                     "num_children": 0,
                     "p_success": None,
-                    "file": fpath.name,
                     "corrupt": True,
                 }
             )
-
+            continue
+        last_run = profile.last_results
+        results.append(
+            {
+                "file": path.name,
+                "name": profile.profile_name,
+                "created_at": profile.created_at,
+                "updated_at": profile.updated_at,
+                "num_earners": profile.inputs.household.num_earners,
+                "num_children": profile.inputs.household.num_children,
+                "p_success": last_run.p_success if last_run else None,
+                "corrupt": False,
+            }
+        )
     return results
 
 
-def delete_profile(profile_name: str) -> bool:
-    """Delete a profile by name.
-
-    Args:
-        profile_name: The profile name (filename stem).
+def delete_profile(file: str | Path) -> bool:
+    """Delete a profile by file name as returned by ``list_profiles``.
 
     Returns:
-        True if deleted, False if not found.
+        True if deleted, False if no such file exists.
 
     """
-    filename = _sanitise_filename(profile_name) + ".json"
-    path = _profiles_dir() / filename
-    if path.exists():
-        path.unlink()
-        return True
-    return False
+    path = _profiles_dir() / Path(file).name
+    if not path.is_file():
+        return False
+    path.unlink()
+    return True

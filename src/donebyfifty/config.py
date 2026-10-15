@@ -1,18 +1,47 @@
 """Configuration constants and defaults.
 
-All simulation assumptions that are NOT part of the verified mathematical
-primitives live here. No simulation, I/O, or UI code in this module.
-
-Constants that ARE part of the verified maths live in ``primitives.py``
-(``EQ_MEAN``, ``BRACKETS``, ``CGT_FLOOR_RATE``, ``MEDICARE``, etc.) and are
-imported by ``simulation.py`` directly.
+Simulation assumptions that are not part of the verified tax, returns, mortgage
+or CGT kernels live here. EDU_SCHEDULE_TODAY is the education cost schedule.
 """
 
 from __future__ import annotations
 
-from typing import Final
+from typing import (
+    Final,
+)
 
-import primitives as _prim
+# Education cost schedule (reference family's actual fee schedule, today's dollars)
+# $292,008 total, from original client's fee schedule.
+# Preschool/daycare (ages 0-4): ~$15,000/yr (average)
+# Prep (age 5):      $19,168
+# Years 1-6 (6-11):  ~$19,972-20,352/yr
+# Years 7-12 (12-17): ~$25,224-25,600/yr
+EDU_SCHEDULE_TODAY: Final[dict[int, float]] = {
+    0: 15000,
+    1: 15000,
+    2: 15000,
+    3: 15000,
+    4: 15000,
+    5: 19168,
+    6: 19972,
+    7: 19976,
+    8: 20040,
+    9: 20196,
+    10: 20188,
+    11: 20352,
+    12: 25308,
+    13: 25292,
+    14: 25600,
+    15: 25224,
+    16: 25316,
+    17: 25376,
+}
+
+# Default education schedule as sorted (age, annual cost) pairs. The engine reads an empty
+# Child.education_schedule as no costs, so the default is stored as this table, not as ().
+DEFAULT_EDU_SCHEDULE: Final[tuple[tuple[int, float], ...]] = tuple(
+    sorted(EDU_SCHEDULE_TODAY.items())
+)
 
 # =============================================================================
 # AUSTRALIAN SUPERANNUATION CONSTANTS
@@ -26,24 +55,9 @@ DIV293_RATE: Final[float] = 0.15  # Division 293 additional tax rate
 
 # Default indexation rates for policy parameters (used in UI warnings)
 DEFAULT_CONC_CAP_GROWTH_RATE: Final[float] = 0.03  # annual growth for concessional cap
-# DEPRECATED — Div 293 threshold is statutory, not indexed.
-DEFAULT_DIV293_GROWTH_RATE: Final[float] = 0.025
-
-# =============================================================================
-# TAX CACHE CLEARING
-# =============================================================================
 
 
-def clear_tax_cache() -> None:
-    """Reset the part-time income tax cache between simulation runs.
-
-    Must be called before each independent simulation run to prevent
-    stale bracket-indexed entries from leaking across runs.
-    """
-    _prim.PT_TAX_CALC_CACHE.clear()
-
-
-# MLS tiers live in primitives.py (single source of truth alongside BRACKETS).
+# MLS tiers live in tax.py (single source of truth for the Medicare Levy Surcharge).
 
 
 # =============================================================================
@@ -53,7 +67,7 @@ def clear_tax_cache() -> None:
 DEFAULT_SIM_START_AGE: Final[int] = 37
 
 # =============================================================================
-# FILE / PATH SETTINGS
+# MORTGAGE RATE (BLACK-KARASINSKI) PARAMETERS
 # =============================================================================
 
 # Convention A: all sigma values are continuous-time OU diffusion coefficients
@@ -62,9 +76,11 @@ DEFAULT_SIM_START_AGE: Final[int] = 37
 # NOT sigma_tilde * sqrt(1 - exp(-2*kappa)).  The sqrt(2*kappa) factor
 # connects the continuous-time and discrete-time parameterisations.
 #
-# Moderate default: 95% steady-state interval ~[3.7%, 11.4%]
-#   (contains the 2000-2024 Australian variable rate range of ~[4.1%, 9.5%])
-# Stress calibration:  95% steady-state interval ~[3.0%, 14.1%]
+# Mean-centred: BK_THETA is the stationary arithmetic mean of the rate, so the
+# stationary log-rate variance is sigma**2 / (2*kappa). Stationary 95% intervals:
+#   Moderate (sigma 0.18): ~[3.6%, 10.9%]
+#     (contains the 2000-2024 Australian variable rate range of ~[4.1%, 9.5%])
+#   Stress (sigma 0.25):   ~[2.8%, 13.1%]
 
 BK_SIGMA_MODERATE: Final[float] = 0.18  # continuous-time diffusion coeff (sigma_tilde)
 BK_SIGMA_STRESS: Final[float] = 0.25  # stress calibration (wider dispersion)

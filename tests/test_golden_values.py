@@ -11,54 +11,43 @@ Scenario:
   - SG rate 12%, salary growth 0%
   - All returns deterministic (mean returns)
 
-Expected hand calculation (year-by-year):
-  Year 0 (age 60):
-    Salary: $100,000
-    SG contribution: $100,000 * 0.12 = $12,000
-    Tax on $100,000 (2025-26 brackets):
-      Tax = 0 + (45000-18200)*0.16 + (100000-45000)*0.30 = 0 + 4288 + 16500 = 20788
-      Medicare = 100000 * 0.02 = 2000
-      Total tax = 22788
-    Take-home = 100000 - 22788 = 77212
-    Super balance: 200000 * (1 + 0.07) + 12000 = 214000 + 12000 = 226000
-    Cash surplus = 77212 - 70000 = 7212
-    Cash balance = 7212
+Expected hand calculation (year-by-year). The simulation starts in FY2026-27
+(``simulation_start_year=2026``). Bracket schedule (D10): the 18,201-45,000 band is 15%
+for FY2026 and 14% from FY2027. Taxable income = salary (no sacrifice). LITO is zero
+above $45,000. Medicare = 2% of $100,000 = $2,000 each year.
 
-  Year 1 (age 61):
-    Salary: $100,000
-    SG: $12,000
-    Tax: $22,788 (same)
-    Take-home: $77,212
-    Super: 226000 * 1.07 + 12000 = 241820 + 12000 = 253820
-    Cash surplus: 77212 - 70000 = 7212
-    Cash balance: 7212 + 7212 = 14424
+  Tax on $100,000:
+    FY2026 (15%): (45000-18200)*0.15 + (100000-45000)*0.30 = 4020 + 16500 = 20520
+                  + Medicare 2000 = 22520 tax; take-home = 100000 - 22520 = 77480
+    FY2027+ (14%): (45000-18200)*0.14 + 16500 = 3752 + 16500 = 20252
+                  + Medicare 2000 = 22252 tax; take-home = 100000 - 22252 = 77748
 
-  Year 2 (age 62):
-    Tax: $22,788
-    Take-home: $77,212
-    Super: 253820 * 1.07 + 12000 = 271587.4 + 12000 = 283587.4
-    Cash: 14424 + 7212 = 21636
+  Year-by-year (cash earns no interest; surplus = take-home - $70,000 expenses):
+    Year 0 (age 60, FY2026): take-home 77480, surplus 7480, cash 7480
+    Year 1 (age 61, FY2027): take-home 77748, surplus 7748, cash 15228
+    Year 2 (age 62, FY2028): take-home 77748, surplus 7748, cash 22976
+    Year 3 (age 63, FY2029): take-home 77748, surplus 7748, cash 30724
+    Year 4 (age 64, FY2030): take-home 77748, surplus 7748, cash 38472
 
-  Year 3 (age 63):
-    Super: 283587.4 * 1.07 + 12000 = 303438.518 + 12000 = 315438.518
-    Cash: 21636 + 7212 = 28848
+  Bridge at age 65 = cash after year 4 = 38472.
 
-  Year 4 (age 64):
-    Super: 315438.518 * 1.07 + 12000 = 337519.214 + 12000 = 349519.214
-    Cash: 28848 + 7212 = 36060
+  Super: blended return = 70% equity (6.5% geometric) + 30% bonds (3.0%) = 5.45%,
+  so the half-year growth factor is sqrt(1.0545) = 1.0268885 and the full-year factor
+  is g = 1.0545. Net SG contribution = 12000 * 0.85 = 10200 per year, added at mid-year
+  (D4), so it earns the second half-year's growth too:
+    B(y+1) = g * B(y) + c,  c = 10200 * sqrt(1.0545) = 10474.26,  B(0) = 200000
+  Closed form after 5 years:
+    B5 = g^5 * 200000 + c * (g^4 + g^3 + g^2 + g + 1)
+       = 1.3038659 * 200000 + 10474.26 * 5.5755207
+       = 260773.18 + 58399.47
+       = 319172.64
 
-  Bridge at age 65 (end of year 4): cash_balance = $36,060
-  Total super at age 65: $349,519.21
+  Total super at age 65: $319,172.64
 
 """
 
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-from models import Earner, Household, SimulationInputs
-from simulation import run_single_trial
+from donebyfifty.engine import run_single_trial
+from donebyfifty.models import Earner, Household, SimulationInputs
 
 
 def test_golden_single_earner() -> None:
@@ -79,7 +68,7 @@ def test_golden_single_earner() -> None:
         retirement_target=70_000.0,
     )
     inputs = SimulationInputs(
-        n_iterations=1,
+        n_iterations=2,
         simulation_start_age=60,
         inflation=0.0,
         cgt_on_drawdowns=False,
@@ -88,36 +77,35 @@ def test_golden_single_earner() -> None:
         conc_cap_growth_rate=0.0,
         sg_max_base_growth_rate=0.0,
         mls_enabled=False,
+        simulation_start_year=2026,
     )
 
     # Run single trial with no stochastic noise
     result = run_single_trial(household, inputs)
 
-    # Expected values:
-    #   Take-home per year: $77,212 (salary - tax - medicare, no sacrifice)
-    #   Surplus per year: $7,212 (take-home - $70k expenses)
-    #   Bridge after 5 years: $36,060
-    #   Super: 70% equity(7%) + 30% bonds(3%) = 5.8% blended return
-    #   After 15% contributions tax: net SG = $12,000 * 0.85 = $10,200
-    #   Year-by-year: 200000*1.058+10200=221800, *1.058+10200=244864,
-    #     *1.058+10200=269267, *1.058+10200=295084, *1.058+10200=322399
-    expected_bridge = 36_060.0
-    expected_super = 322_398.87
+    # Expected values (hand calculation in the module docstring):
+    #   Bridge: 7,480 (FY2026, 15% band) + 4 x 7,748 (FY2027-30, 14% band) = 38,472
+    #   Super: 1.0545 blended growth, 10,200 net SG added mid-year -> 319,172.64
+    #   (closed form in the module docstring)
+    expected_bridge = 38_472.0
+    expected_super = 319_172.64
 
     # Allow small tolerance for floating point
     tolerance = 1.0
 
     print("Golden-value test results:")
-    print(f"  Bridge:              ${result.bridge:,.2f}  (expected ~${expected_bridge:,.2f})")
-    print(f"  Total super:         ${result.total_super:,.2f}  (expected ~${expected_super:,.2f})")
-    print(f"  Super balances:      {[f'${s:,.2f}' for s in result.super_balances]}")
+    print(f"  Bridge:              ${result.bridge[0]:,.2f}  (expected ~${expected_bridge:,.2f})")
+    print(
+        f"  Total super:         ${result.total_super[0]:,.2f}  (expected ~${expected_super:,.2f})"
+    )
+    print(f"  Super balances:      {[f'${s:,.2f}' for s in result.super_balances[0]]}")
     print()
 
-    bridge_ok = abs(result.bridge - expected_bridge) <= tolerance
-    super_ok = abs(result.total_super - expected_super) <= tolerance
+    bridge_ok = abs(result.bridge[0] - expected_bridge) <= tolerance
+    super_ok = abs(result.total_super[0] - expected_super) <= tolerance
 
-    assert bridge_ok, f"Bridge mismatch: {result.bridge:.2f} vs expected {expected_bridge:.2f}"
-    assert super_ok, f"Super mismatch: {result.total_super:.2f} vs expected {expected_super:.2f}"
+    assert bridge_ok, f"Bridge mismatch: {result.bridge[0]:.2f} vs expected {expected_bridge:.2f}"
+    assert super_ok, f"Super mismatch: {result.total_super[0]:.2f} vs expected {expected_super:.2f}"
 
     print("PASS: Golden-value test matches hand calculation.")
 
@@ -128,7 +116,7 @@ def test_golden_simple_cgt() -> None:
     Single earner working through the bridge, with an investment account
     that must be drawn down to cover expenses. Deterministic returns.
     """
-    from models import InvestmentAccount, Ownership
+    from donebyfifty.models import InvestmentAccount, Ownership
 
     earner = Earner(
         label="Test",
@@ -146,7 +134,6 @@ def test_golden_simple_cgt() -> None:
         cost_basis=70_000.0,
         asset_class="equity",
         interest_rate=0.07,  # Custom mean 7% return (fixed in deterministic mode)
-        cgt_rate=0.30,
         ownership=Ownership({0: 1.0}),
     )
     household = Household(
@@ -156,7 +143,7 @@ def test_golden_simple_cgt() -> None:
         retirement_target=105_000.0,
     )
     inputs = SimulationInputs(
-        n_iterations=1,
+        n_iterations=2,
         simulation_start_age=60,
         inflation=0.0,
         cgt_on_drawdowns=True,
@@ -171,15 +158,15 @@ def test_golden_simple_cgt() -> None:
 
     # Verify bridge is positive (simulation completes without error)
     print("Golden-value CGT test results:")
-    print(f"  Bridge:              ${result.bridge:,.2f}")
-    print(f"  Total super:         ${result.total_super:,.2f}")
-    print(f"  Min bridge:          ${result.min_bridge:,.2f}")
+    print(f"  Bridge:              ${result.bridge[0]:,.2f}")
+    print(f"  Total super:         ${result.total_super[0]:,.2f}")
+    print(f"  Min bridge:          ${result.min_bridge[0]:,.2f}")
 
     # The bridge should be positive (the investment account + salary
     # covers 100k expenses for 5 years)
-    assert result.bridge > 0, "Bridge should be positive"
+    assert result.bridge[0] > 0, "Bridge should be positive"
     # Total super should have grown from contributions + returns
-    assert result.total_super > 200_000, "Super should have grown"
+    assert result.total_super[0] > 200_000, "Super should have grown"
 
     print("PASS: Golden-value CGT test completes with positive bridge.")
 

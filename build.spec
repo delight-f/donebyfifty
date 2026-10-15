@@ -8,7 +8,6 @@
 # Build flags used:
 #   --onefile         Single executable (not a directory)
 #   --console         Keep as console app (not --windowed)
-#   --upx             Apply UPX compression when available
 #
 # Rich has an official hook in pyinstaller-hooks-contrib so no explicit
 # hiddenimports are needed for standard Rich usage. Test on a clean
@@ -21,10 +20,11 @@
 import sys
 from pathlib import Path
 
-# ── Project root (resolved from working directory, since spec files are
-#    exec'd without ``__file__`` by PyInstaller's build machinery) ─────
-ROOT = Path().resolve()
-SRC = ROOT / "src" / "donebyfifty"
+# ── Project root: PyInstaller exposes the spec's directory as SPECPATH
+#    (spec files are exec'd without ``__file__``). ─────────────────────
+ROOT = Path(SPECPATH).resolve()
+SRC = ROOT / "src"
+PKG = SRC / "donebyfifty"
 
 # ── Icon: only applied on Windows, where PyInstaller supports it. On
 #    Linux/macOS an .ico is not a valid executable icon, so omit it. ───
@@ -51,7 +51,7 @@ EXCLUDES = [
 block_cipher = None
 
 a = Analysis(
-    [str(SRC / "main.py")],
+    [str(PKG / "__main__.py")],
     pathex=[str(SRC)],
     binaries=[],
     datas=[],
@@ -92,7 +92,8 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    # UPX off: extra external tool, false positives in AV scanners, no size win worth the risk.
+    upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
     console=True,

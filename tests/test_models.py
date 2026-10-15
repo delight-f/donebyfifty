@@ -1,22 +1,27 @@
 """Tests for general-purpose data models.
 
-Covers dataclass construction, property access, serialisation round-trips,
-and backward compatibility with v1 profile format.
+Covers dataclass construction, validation, derived properties, serialisation
+round-trips, and upgrades from older profile schema versions.
 """
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
-from models import (
+
+from donebyfifty.models import (
     Child,
     Earner,
     Household,
     InvestmentAccount,
     MortgageAccount,
     Profile,
+    ProfileError,
     SimulationInputs,
     SimulationResults,
     _upgrade_v1_profile,
+    validate_horizon,
 )
 
 # =============================================================================
@@ -26,38 +31,75 @@ from models import (
 
 class TestEarner:
     def test_defaults(self) -> None:
-        e = Earner()
+        e = Earner(super_access_age=60)
         assert e.label == "Earner 1"
         assert e.salary == 100_000.0
         assert e.super_balance == 100_000.0
         assert e.salary_growth_rate == 0.005  # real growth (above inflation)
         assert e.retirement_age == 50
         assert e.super_access_age == 60
+        assert e.birth_year is None
+        assert e.start_age is None
         assert e.sg_rate == 0.12
         assert e.employment_type == "employed"
         assert e.pt_days_per_week == 0.0
+        assert e.pt_start_age is None
+        assert e.pt_end_age is None
+
+    def test_requires_super_access_age_or_birth_year(self) -> None:
+        with pytest.raises(ValueError, match="super_access_age or birth_year"):
+            Earner()
+
+    def test_birth_year_only_is_accepted(self) -> None:
+        e = Earner(birth_year=1990)
+        assert e.super_access_age is None
+        assert e.effective_super_access_age == 60  # preservation age for post-1964 births
 
     def test_immutable(self) -> None:
-        e = Earner(salary=50_000.0)
+        e = Earner(salary=50_000.0, super_access_age=60)
         with pytest.raises(AttributeError):
             e.salary = 60_000.0  # type: ignore[misc]
 
     def test_non_working_earner(self) -> None:
-        e = Earner(employment_type="not_employed", salary=0.0, super_balance=50_000.0)
+        e = Earner(
+            employment_type="not_employed",
+            salary=0.0,
+            super_balance=50_000.0,
+            super_access_age=60,
+        )
         assert e.employment_type == "not_employed"
         assert e.salary == 0.0
 
     def test_part_time_params(self) -> None:
         e = Earner(
+            super_access_age=60,
             pt_days_per_week=2.0,
             pt_start_age=55,
-            pt_end_age=60,
+            pt_end_age=58,
             pt_daily_rate=500.0,
         )
         assert e.pt_days_per_week == 2.0
         assert e.pt_start_age == 55
-        assert e.pt_end_age == 60
+        assert e.pt_end_age == 58
         assert e.pt_daily_rate == 500.0
+
+    def test_effective_pt_ages_fall_back_when_unset(self) -> None:
+        e = Earner(super_access_age=60, retirement_age=52)
+        assert e.effective_pt_start_age == 52
+        assert e.effective_pt_end_age == 60
+
+    def test_effective_pt_ages_use_explicit_values(self) -> None:
+        e = Earner(super_access_age=60, retirement_age=52, pt_start_age=55, pt_end_age=58)
+        assert e.effective_pt_start_age == 55
+        assert e.effective_pt_end_age == 58
+
+    def test_replace_retirement_age_moves_effective_pt_start(self) -> None:
+        e = replace(Earner(super_access_age=60), retirement_age=45)
+        assert e.effective_pt_start_age == 45
+
+    def test_resolved_start_age(self) -> None:
+        assert Earner(super_access_age=60).resolved_start_age(40) == 40
+        assert Earner(super_access_age=60, start_age=45).resolved_start_age(40) == 45
 
 
 # =============================================================================
@@ -72,19 +114,9 @@ class TestChild:
         assert c.age == 5
         assert c.education_schedule == ()
 
-    def test_with_schedule(self) -> None:
-        schedule = ((5, 10_000.0), (6, 10_500.0), (7, 11_000.0))
-        c = Child(label="Alice", age=3, education_schedule=schedule)
-        assert c.label == "Alice"
-        assert c.age == 3
-        assert len(c.education_schedule) == 3
-
-    def test_empty_schedule_no_cost(self) -> None:
-        c = Child(age=5)
-        assert c.education_schedule == ()
-
-    def test_immutable_schedule(self) -> None:
-        c = Child(education_schedule=((5, 5000.0),))
+    def test_schedule_is_immutable(self) -> None:
+        c = Child(label="Scholar", age=5, education_schedule=((6, 6000.0),))
+        assert c.education_schedule[0] == (6, 6000.0)
         with pytest.raises(TypeError):
             c.education_schedule[0] = (6, 6000.0)  # type: ignore[index]
 
@@ -101,6 +133,7 @@ class TestMortgageAccount:
         assert m.principal == 500_000.0
         assert m.interest_rate == 0.0605
         assert m.monthly_payment == 0.0  # interest-only by default
+        assert m.reprice_payment is False
         assert m.offset_accounts == ()
 
     def test_with_offset_link(self) -> None:
@@ -130,9 +163,8 @@ class TestInvestmentAccount:
         assert a.market_value == 0.0
         assert a.cost_basis == 0.0
         assert a.asset_class == "equity"
-        assert a.tax_jurisdiction == "au"
-        assert a.cgt_rate == 0.30
         assert a.is_offset is False
+        assert a.interest_rate is None  # None = asset class default
 
     def test_offset_account(self) -> None:
         a = InvestmentAccount(
@@ -141,14 +173,19 @@ class TestInvestmentAccount:
             cost_basis=100_000.0,
             asset_class="cash",
             is_offset=True,
-            cgt_rate=0.0,
         )
         assert a.is_offset is True
-        assert a.cgt_rate == 0.0
 
-    def test_uk_jurisdiction(self) -> None:
-        a = InvestmentAccount(label="UK ETFs", tax_jurisdiction="uk", cgt_rate=0.30)
-        assert a.tax_jurisdiction == "uk"
+    def test_fixed_zero_return_is_distinct_from_default(self) -> None:
+        """0.0 means a fixed 0% return; None means the asset class default."""
+        assert InvestmentAccount(interest_rate=0.0).interest_rate == 0.0
+        assert InvestmentAccount().interest_rate is None
+
+    def test_removed_per_profile_tax_fields(self) -> None:
+        with pytest.raises(TypeError):
+            InvestmentAccount(cgt_rate=0.30)  # type: ignore[call-arg]
+        with pytest.raises(TypeError):
+            InvestmentAccount(tax_jurisdiction="uk")  # type: ignore[call-arg]
 
 
 # =============================================================================
@@ -160,21 +197,22 @@ class TestHousehold:
     def test_default_single_earner(self) -> None:
         h = Household()
         assert h.num_earners == 1
+        assert h.earners[0].super_access_age == 60
         assert h.num_children == 0
         assert h.num_mortgages == 0
         assert h.base_living_expenses == 60_000.0
         assert h.retirement_target == 80_000.0
 
     def test_multi_earner_household(self) -> None:
-        e1 = Earner(label="Person A", salary=120_000.0, super_balance=80_000.0)
-        e2 = Earner(label="Person B", salary=80_000.0, super_balance=40_000.0)
+        e1 = Earner(label="Person A", salary=120_000.0, super_balance=80_000.0, super_access_age=60)
+        e2 = Earner(label="Person B", salary=80_000.0, super_balance=40_000.0, super_access_age=60)
         h = Household(earners=(e1, e2))
         assert h.num_earners == 2
         assert h.total_super == 120_000.0
 
     def test_family_with_children(self) -> None:
-        e1 = Earner(label="Parent 1")
-        e2 = Earner(label="Parent 2")
+        e1 = Earner(label="Parent 1", super_access_age=60)
+        e2 = Earner(label="Parent 2", super_access_age=60)
         c1 = Child(label="Child A", age=5)
         c2 = Child(label="Child B", age=8)
         c3 = Child(label="Child C", age=12)
@@ -206,6 +244,7 @@ class TestSimulationInputs:
         assert s.n_iterations == 5_000
         assert s.inflation == 0.025
         assert s.simulation_start_age == 37
+        assert isinstance(s.simulation_start_year, int)
         assert s.cgt_on_drawdowns is True
         assert s.sell_strategy == "waterfall"
         assert s.sell_order == ()
@@ -331,7 +370,7 @@ class TestProfileSerialisation:
         assert p2.last_results is None
 
     def test_roundtrip_multi_child(self) -> None:
-        e1 = Earner(label="Parent")
+        e1 = Earner(label="Parent", super_access_age=60)
         c1 = Child(label="Child A", age=5)
         c2 = Child(label="Child B", age=8)
         c3 = Child(label="Child C", age=12)
@@ -348,6 +387,18 @@ class TestProfileSerialisation:
         assert p2.inputs.household.num_children == 3
         assert p2.inputs.household.base_living_expenses == 70_000.0
         assert p2.inputs.household.children[1].age == 8
+
+    def test_roundtrip_optional_fields_keep_none(self) -> None:
+        e = Earner(super_access_age=60, pt_days_per_week=1.0, pt_start_age=None, pt_end_age=None)
+        a = InvestmentAccount(label="Fixed", market_value=10.0, interest_rate=0.0)
+        h = Household(earners=(e,), investment_accounts=(a,))
+        p2 = Profile.from_dict(
+            Profile(profile_name="Opt", inputs=SimulationInputs(household=h)).to_dict()
+        )
+        loaded_e = p2.inputs.household.earners[0]
+        assert loaded_e.pt_start_age is None
+        assert loaded_e.pt_end_age is None
+        assert p2.inputs.household.investment_accounts[0].interest_rate == 0.0
 
     def test_roundtrip_multiple_mortgages(self) -> None:
         m1 = MortgageAccount(label="Home Loan", principal=600_000.0)
@@ -386,9 +437,25 @@ class TestProfileSerialisation:
         assert cost == 11_000.0
 
     def test_version_marker(self) -> None:
-        p = Profile(profile_name="V2")
+        p = Profile(profile_name="V3")
         d = p.to_dict()
-        assert d["_version"] == 2
+        assert d["_version"] == 3
+
+    def test_unsupported_version_rejected(self) -> None:
+        d = Profile(profile_name="Future").to_dict()
+        d["_version"] = 4
+        with pytest.raises(ProfileError, match="version 4"):
+            Profile.from_dict(d)
+
+    def test_invalid_earner_becomes_profile_error(self) -> None:
+        """An earner with no age source fails validation and is reported as ProfileError."""
+        data = {
+            "_version": 3,
+            "profile_name": "Bad",
+            "inputs": {"household": {"earners": [{"label": "X", "salary": 1.0}]}},
+        }
+        with pytest.raises(ProfileError):
+            Profile.from_dict(data)
 
 
 # =============================================================================
@@ -514,3 +581,40 @@ class TestBackwardCompat:
         data = {"profile_name": "Empty", "inputs": {}}
         upgraded = _upgrade_v1_profile(data)
         assert upgraded["profile_name"] == "Empty"
+
+    def test_v2_sentinels_upgrade_to_none(self) -> None:
+        """v2 used -1 / 0 / 0.0 sentinels; v3 uses None for each."""
+        d = Profile(
+            profile_name="Sentinels",
+            inputs=SimulationInputs(
+                household=Household(
+                    earners=(Earner(super_access_age=60, pt_days_per_week=1.0),),
+                    investment_accounts=(InvestmentAccount(label="Fixed", interest_rate=None),),
+                )
+            ),
+        ).to_dict()
+        d["_version"] = 2
+        earner = d["inputs"]["household"]["earners"][0]
+        earner["pt_start_age"] = -1
+        earner["pt_end_age"] = 0
+        d["inputs"]["household"]["investment_accounts"][0]["interest_rate"] = 0.0
+
+        loaded = Profile.from_dict(d)
+        assert loaded.inputs.household.earners[0].pt_start_age is None
+        assert loaded.inputs.household.earners[0].pt_end_age is None
+        assert loaded.inputs.household.investment_accounts[0].interest_rate is None
+
+
+class TestValidateHorizon:
+    def test_default_household_has_horizon(self) -> None:
+        validate_horizon(Household(), SimulationInputs(simulation_start_age=37))
+
+    def test_super_access_must_follow_start_age(self) -> None:
+        h = Household(earners=(Earner(super_access_age=60),))
+        with pytest.raises(ValueError, match="must be above start age 60"):
+            validate_horizon(h, SimulationInputs(simulation_start_age=60))
+
+    def test_earner_start_age_overrides_simulation_start(self) -> None:
+        h = Household(earners=(Earner(super_access_age=60, start_age=60),))
+        with pytest.raises(ValueError, match="must be above start age 60"):
+            validate_horizon(h, SimulationInputs(simulation_start_age=40))
